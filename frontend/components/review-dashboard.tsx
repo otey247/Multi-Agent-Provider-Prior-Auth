@@ -83,23 +83,25 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
 
   return (
     <div className="mt-8 space-y-6 animate-in fade-in-0 slide-in-from-bottom-4 duration-500">
-      {/* Recommendation header */}
+      {/* Submission readiness header */}
       <Card className="shadow-sm border-l-4 border-l-primary">
         <CardHeader>
           <div className="flex flex-wrap items-center gap-3">
             <CardTitle className="text-lg flex items-center gap-2">
               <ClipboardList className="h-5 w-5 text-primary" />
-              Review Result
+              Submission Readiness Assessment
             </CardTitle>
             <Badge
               variant={
-                review.recommendation === "approve" ? "success" : "warning"
+                review.recommendation === "ready_to_submit" || review.recommendation === "approve"
+                  ? "success"
+                  : "warning"
               }
               className="text-sm px-3 py-1"
             >
-              {review.recommendation === "approve"
-                ? "Recommend Approve"
-                : "Pend for Review"}
+              {review.recommendation === "ready_to_submit" || review.recommendation === "approve"
+                ? "Ready to Submit"
+                : "Needs Review"}
             </Badge>
             <Badge variant="outline" className="text-sm">{review.confidence_level}</Badge>
           </div>
@@ -148,14 +150,14 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
         </Card>
       )}
 
-      {/* Coverage criteria */}
+      {/* Payer requirements */}
       {((review.coverage_criteria_met?.length ?? 0) > 0 ||
         (review.coverage_criteria_not_met?.length ?? 0) > 0) && (
         <Card className="shadow-sm">
           <CardHeader>
             <CardTitle className="text-sm font-medium uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
               <Scale className="h-4 w-4" />
-              Coverage Criteria
+              Payer Policy Requirements
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -163,7 +165,7 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
               <div>
                 <p className="text-sm font-medium text-success-dark mb-1 flex items-center gap-1.5">
                   <CheckCircle2 className="h-4 w-4" />
-                  Criteria Met
+                  Requirements Met
                 </p>
                 <ul className="list-disc list-inside text-sm text-muted-foreground space-y-0.5">
                   {(review.coverage_criteria_met ?? []).map((c, i) => (
@@ -176,7 +178,7 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
               <div>
                 <p className="text-sm font-medium text-destructive mb-1 flex items-center gap-1.5">
                   <ShieldAlert className="h-4 w-4" />
-                  Criteria Not Met
+                  Requirements Not Yet Met
                 </p>
                 <ul className="list-disc list-inside text-sm text-muted-foreground space-y-0.5">
                   {(review.coverage_criteria_not_met ?? []).map((c, i) => (
@@ -193,7 +195,7 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
       {(review.missing_documentation?.length ?? 0) > 0 && (
         <Alert variant="destructive">
           <AlertTriangle className="h-4 w-4" />
-          <AlertTitle>Missing Documentation</AlertTitle>
+          <AlertTitle>Documentation Action Required</AlertTitle>
           <AlertDescription>
             <ul className="list-disc list-inside mt-1 space-y-0.5">
               {(review.missing_documentation ?? []).map((doc, i) => (
@@ -220,7 +222,7 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
                   variant={gap.critical ? "destructive" : "warning"}
                   className="mt-0.5 shrink-0"
                 >
-                  {gap.critical ? "Critical" : "Non-critical"}
+                  {gap.critical ? "Required" : "Recommended"}
                 </Badge>
                 <div>
                   <p className="font-medium">{gap.what}</p>
@@ -238,7 +240,7 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
           <CardHeader>
             <CardTitle className="text-sm font-medium uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
               <BookOpen className="h-4 w-4" />
-              Policy References
+              Payer Policy References
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -251,13 +253,13 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
         </Card>
       )}
 
-      {/* Clinical rationale */}
+      {/* Clinical evidence rationale */}
       {review.clinical_rationale && (
         <Card className="shadow-sm">
           <CardHeader>
             <CardTitle className="text-sm font-medium uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
               <ScrollText className="h-4 w-4" />
-              Clinical Rationale
+              Clinical Evidence Rationale
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -282,38 +284,38 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
           <CardHeader>
             <CardTitle className="text-sm font-medium uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
               <Database className="h-4 w-4" />
-              Audit Trail
+              Assessment Audit Trail
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
               <div>
-                <p className="font-medium flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-muted-foreground" />Review Started</p>
+                <p className="font-medium flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-muted-foreground" />Assessment Started</p>
                 <p className="text-muted-foreground ml-5">
                   {review.audit_trail.review_started}
                 </p>
               </div>
               <div>
-                <p className="font-medium flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-muted-foreground" />Review Completed</p>
+                <p className="font-medium flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-muted-foreground" />Assessment Completed</p>
                 <p className="text-muted-foreground ml-5">
                   {review.audit_trail.review_completed}
                 </p>
               </div>
               <div>
-                <p className="font-medium flex items-center gap-1.5"><CheckCircle2 className="h-3.5 w-3.5 text-muted-foreground" />Criteria Met</p>
+                <p className="font-medium flex items-center gap-1.5"><CheckCircle2 className="h-3.5 w-3.5 text-muted-foreground" />Requirements Met</p>
                 <p className="text-muted-foreground ml-5">
                   {review.audit_trail.criteria_met_count}
                 </p>
               </div>
               <div>
-                <p className="font-medium flex items-center gap-1.5"><TrendingUp className="h-3.5 w-3.5 text-muted-foreground" />Extraction Confidence</p>
+                <p className="font-medium flex items-center gap-1.5"><TrendingUp className="h-3.5 w-3.5 text-muted-foreground" />Evidence Extraction Confidence</p>
                 <ConfidenceBar
                   value={review.audit_trail.extraction_confidence}
                   className="w-32 ml-5"
                 />
               </div>
               <div>
-                <p className="font-medium flex items-center gap-1.5"><TrendingUp className="h-3.5 w-3.5 text-muted-foreground" />Assessment Confidence</p>
+                <p className="font-medium flex items-center gap-1.5"><TrendingUp className="h-3.5 w-3.5 text-muted-foreground" />Policy Matching Confidence</p>
                 <ConfidenceBar
                   value={review.audit_trail.assessment_confidence}
                   className="w-32 ml-5"
@@ -321,7 +323,7 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
               </div>
               {(review.audit_trail.data_sources?.length ?? 0) > 0 && (
                 <div className="col-span-full">
-                  <p className="font-medium mb-1 flex items-center gap-1.5"><Database className="h-3.5 w-3.5 text-muted-foreground" />Data Sources</p>
+                  <p className="font-medium mb-1 flex items-center gap-1.5"><Database className="h-3.5 w-3.5 text-muted-foreground" />Data Sources Consulted</p>
                   <div className="flex flex-wrap gap-1 ml-5">
                     {(review.audit_trail.data_sources ?? []).map((src, i) => (
                       <Badge key={i} variant="outline" className="text-xs">
@@ -336,7 +338,7 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
         </Card>
       )}
 
-      {/* Download audit justification */}
+      {/* Download submission readiness report */}
       {(auditPdf || review.audit_justification) && (
         <Card className="shadow-sm border border-info/30 bg-gradient-to-r from-info-light/60 to-info-light/30">
           <CardContent className="py-4">
@@ -346,9 +348,9 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
                   <FileText className="h-5 w-5 text-info" />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-foreground">Audit Justification Document</p>
+                  <p className="text-sm font-semibold text-foreground">Submission Readiness Report</p>
                   <p className="text-xs text-muted-foreground">
-                    Full 8-section review with criterion evaluations, validation checks, and decision rationale
+                    Full 8-section report with requirement evaluations, validation checks, evidence review, and readiness rationale
                   </p>
                 </div>
               </div>
@@ -359,7 +361,7 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
                 className="border-info/50 text-info hover:bg-info-light hover:text-info"
               >
                 <Download className="mr-1.5 h-4 w-4" />
-                Download Audit Justification
+                Download Report
               </Button>
             </div>
           </CardContent>

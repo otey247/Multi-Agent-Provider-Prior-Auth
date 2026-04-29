@@ -28,18 +28,27 @@ interface Props {
 
 type Mode = "initial" | "override" | "submitted";
 
+/** Normalize legacy recommendation values to provider-side display labels. */
+function normalizeRec(rec: string): string {
+  if (rec === "approve" || rec === "ready_to_submit") return "ready_to_submit";
+  return "needs_review";
+}
+
 export function DecisionPanel({ review, onDecision }: Props) {
   const [mode, setMode] = useState<Mode>("initial");
   const [reviewerName, setReviewerName] = useState("");
-  const [overrideRec, setOverrideRec] = useState<"approve" | "pend_for_review">(
-    review.recommendation === "approve" ? "pend_for_review" : "approve"
+  const normalizedRec = normalizeRec(review.recommendation);
+  const [overrideRec, setOverrideRec] = useState<"ready_to_submit" | "needs_review">(
+    normalizedRec === "ready_to_submit" ? "needs_review" : "ready_to_submit"
   );
   const [overrideRationale, setOverrideRationale] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [decision, setDecision] = useState<DecisionResponse | null>(null);
 
-  const isApproval = decision?.final_recommendation === "approve";
+  const isReadyToSubmit =
+    decision?.final_recommendation === "ready_to_submit" ||
+    decision?.final_recommendation === "approve";
 
   // Build a blob URL for the PDF viewer when we have PDF data
   const pdfBlobUrl = useMemo(() => {
@@ -67,14 +76,14 @@ export function DecisionPanel({ review, onDecision }: Props) {
     try {
       const resp = await submitDecision({
         request_id: review.request_id,
-        action: "accept",
+        action: "submit",
         reviewer_name: reviewerName.trim(),
       });
       setDecision(resp);
       setMode("submitted");
       onDecision?.(resp);
-      toast.success("Decision recorded", {
-        description: `Auth #${resp.authorization_number}`,
+      toast.success("Authorization recorded", {
+        description: `Ref #${resp.authorization_number}`,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Decision failed");
@@ -90,7 +99,7 @@ export function DecisionPanel({ review, onDecision }: Props) {
       return;
     }
     if (!overrideRationale.trim()) {
-      setError("Override rationale is required");
+      setError("Rationale is required when revising the assessment");
       return;
     }
     setLoading(true);
@@ -98,7 +107,7 @@ export function DecisionPanel({ review, onDecision }: Props) {
     try {
       const resp = await submitDecision({
         request_id: review.request_id,
-        action: "override",
+        action: "revise",
         override_recommendation: overrideRec,
         override_rationale: overrideRationale.trim(),
         reviewer_name: reviewerName.trim(),
@@ -106,12 +115,12 @@ export function DecisionPanel({ review, onDecision }: Props) {
       setDecision(resp);
       setMode("submitted");
       onDecision?.(resp);
-      toast.success("Override recorded", {
-        description: `Auth #${resp.authorization_number}`,
+      toast.success("Revised assessment recorded", {
+        description: `Ref #${resp.authorization_number}`,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Decision failed");
-      toast.error("Override failed");
+      toast.error("Revision failed");
     } finally {
       setLoading(false);
     }
@@ -151,42 +160,44 @@ export function DecisionPanel({ review, onDecision }: Props) {
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2">
             <Award className="h-5 w-5 text-success" />
-            Decision Recorded
+            Authorization Recorded
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center gap-2">
             <Badge variant="success" className="text-sm px-3 py-1.5">
-              Auth #: {decision.authorization_number}
+              Ref #: {decision.authorization_number}
             </Badge>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-semibold">Final Recommendation:</span>
+            <span className="text-sm font-semibold">Submission Status:</span>
             <Badge
-              variant={isApproval ? "success" : "warning"}
+              variant={isReadyToSubmit ? "success" : "warning"}
               className="text-sm px-3 py-1.5 font-bold"
             >
-              {isApproval ? (
+              {isReadyToSubmit ? (
                 <CheckCircle2 className="mr-1.5 h-4 w-4" />
               ) : (
                 <AlertTriangle className="mr-1.5 h-4 w-4" />
               )}
-              {decision.final_recommendation.replace(/_/g, " ").toUpperCase()}
+              {isReadyToSubmit ? "READY TO SUBMIT" : "NEEDS REVIEW"}
             </Badge>
             {decision.was_overridden && (
               <Badge variant="outline" className="text-warning border-warning/50">
-                Overridden
+                Staff Revised
               </Badge>
             )}
           </div>
           {decision.was_overridden && decision.override_rationale && (
             <div className="rounded-md border border-warning/30 bg-warning/5 p-3 space-y-1">
-              <p className="text-sm font-semibold text-warning">Clinician Override</p>
+              <p className="text-sm font-semibold text-warning">Staff Override</p>
               {decision.original_recommendation && (
                 <p className="text-xs text-muted-foreground">
-                  Original AI Recommendation:{" "}
+                  Original AI Assessment:{" "}
                   <span className="font-medium">
-                    {decision.original_recommendation.replace(/_/g, " ").toUpperCase()}
+                    {normalizeRec(decision.original_recommendation) === "ready_to_submit"
+                      ? "READY TO SUBMIT"
+                      : "NEEDS REVIEW"}
                   </span>
                 </p>
               )}
@@ -196,14 +207,14 @@ export function DecisionPanel({ review, onDecision }: Props) {
           <div>
             <p className="text-sm font-medium mb-2 flex items-center gap-1.5">
               <FileText className="h-3.5 w-3.5 text-muted-foreground" />
-              Notification Letter
+              Provider Letter
             </p>
             {pdfBlobUrl ? (
               <div className="rounded-md border overflow-hidden">
                 <iframe
                   src={pdfBlobUrl}
                   className="w-full h-[500px]"
-                  title="Notification Letter PDF"
+                  title="Provider Letter PDF"
                 />
               </div>
             ) : (
@@ -217,11 +228,11 @@ export function DecisionPanel({ review, onDecision }: Props) {
           <div className="flex items-center gap-3">
             <Button onClick={handleDownload} className="bg-gradient-to-r from-brand to-brand-dark hover:from-brand-hover hover:to-brand-hover-dark text-white shadow-sm">
               <Download className="mr-2 h-4 w-4" />
-              Download Notification Letter
+              Download Provider Letter
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Decided by: {decision.decided_by} | {decision.decided_at}
+            Reviewed by: {decision.decided_by} | {decision.decided_at}
           </p>
         </CardContent>
       </Card>
@@ -234,43 +245,43 @@ export function DecisionPanel({ review, onDecision }: Props) {
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2">
             <ArrowRightLeft className="h-5 w-5 text-warning" />
-            Override Recommendation
+            Revise Assessment
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="reviewer_override">Reviewer Name</Label>
+            <Label htmlFor="reviewer_override">Staff Reviewer Name</Label>
             <Input
               id="reviewer_override"
               value={reviewerName}
               onChange={(e) => setReviewerName(e.target.value)}
-              placeholder="Dr. Jane Doe"
+              placeholder="Jane Doe, Prior Auth Specialist"
             />
           </div>
           <div className="space-y-2">
-            <Label>New Recommendation</Label>
+            <Label>Revised Assessment</Label>
             <Select
               value={overrideRec}
               onValueChange={(v) =>
-                setOverrideRec(v as "approve" | "pend_for_review")
+                setOverrideRec(v as "ready_to_submit" | "needs_review")
               }
             >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="approve">Approve</SelectItem>
-                <SelectItem value="pend_for_review">Pend for Review</SelectItem>
+                <SelectItem value="ready_to_submit">Ready to Submit</SelectItem>
+                <SelectItem value="needs_review">Needs Review</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="rationale">Override Rationale (required)</Label>
+            <Label htmlFor="rationale">Rationale (required)</Label>
             <Textarea
               id="rationale"
               value={overrideRationale}
               onChange={(e) => setOverrideRationale(e.target.value)}
-              placeholder="Explain why you are overriding the AI recommendation..."
+              placeholder="Explain why you are revising the AI assessment..."
               className="min-h-[80px]"
             />
           </div>
@@ -281,7 +292,7 @@ export function DecisionPanel({ review, onDecision }: Props) {
               className="bg-warning text-white hover:bg-warning-dark"
             >
               {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {loading ? "Submitting..." : "Submit Override"}
+              {loading ? "Submitting..." : "Submit Revision"}
             </Button>
             <Button
               variant="ghost"
@@ -309,17 +320,17 @@ export function DecisionPanel({ review, onDecision }: Props) {
       <CardHeader className="pb-3">
         <CardTitle className="text-base flex items-center gap-2">
           <Gavel className="h-5 w-5 text-primary" />
-          Reviewer Decision
+          Staff Review Decision
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="reviewer_name">Reviewer Name</Label>
+          <Label htmlFor="reviewer_name">Staff Reviewer Name</Label>
           <Input
             id="reviewer_name"
             value={reviewerName}
             onChange={(e) => setReviewerName(e.target.value)}
-            placeholder="Dr. Jane Doe"
+            placeholder="Jane Doe, Prior Auth Specialist"
           />
         </div>
         <div className="flex flex-wrap gap-2">
@@ -333,7 +344,7 @@ export function DecisionPanel({ review, onDecision }: Props) {
             ) : (
               <Check className="mr-2 h-4 w-4" />
             )}
-            {loading ? "Submitting..." : "Accept Recommendation"}
+            {loading ? "Submitting..." : "Accept AI Assessment"}
           </Button>
           <Button
             variant="secondary"
@@ -345,7 +356,7 @@ export function DecisionPanel({ review, onDecision }: Props) {
             className="border border-warning/50 bg-warning-light text-warning-dark hover:bg-warning/20"
           >
             <ArrowRightLeft className="mr-2 h-4 w-4" />
-            Override
+            Revise Assessment
           </Button>
         </div>
         {error && (

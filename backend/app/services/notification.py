@@ -25,13 +25,12 @@ def generate_authorization_number() -> str:
 
 
 _DISCLAIMER_HEADER = """\
-AI-ASSISTED DRAFT - REVIEW REQUIRED
-Coverage policies reflect Medicare LCDs/NCDs only. If this review is for a
-commercial or Medicare Advantage plan, payer-specific policies were not applied.
-All decisions require human clinical review before finalization."""
+AI-ASSISTED DRAFT - PROVIDER REVIEW REQUIRED
+Evidence matching reflects Medicare LCDs/NCDs only. Commercial and Medicare
+Advantage plan requirements may differ. Human clinical review required before submission."""
 
 
-def generate_approval_letter(
+def generate_submission_ready_letter(
     authorization_number: str,
     patient_name: str,
     patient_dob: str,
@@ -52,10 +51,10 @@ def generate_approval_letter(
     override_reviewer: str = "",
     original_recommendation: str = "",
 ) -> dict:
-    """Generate an APPROVAL notification letter.
+    """Generate a SUBMISSION READY notification for the provider.
 
     Returns dict matching NotificationLetter schema.
-    Approval validity: today -> today + 90 days.
+    Auth reference validity: today -> today + 90 days.
     """
     today = date.today()
     expiration = today + timedelta(days=90)
@@ -64,20 +63,20 @@ def generate_approval_letter(
     policy_section = ""
     if policy_references:
         refs = "\n".join(f"  - {ref}" for ref in policy_references)
-        policy_section = f"\n\nCOVERAGE POLICY REFERENCE:\n{refs}"
+        policy_section = f"\n\nPAYER POLICY REFERENCE:\n{refs}"
 
     confidence_section = ""
     if confidence_level:
-        confidence_section = f"\n\nCONFIDENCE: {confidence_level} ({int(confidence * 100)}%)"
+        confidence_section = f"\n\nSUBMISSION CONFIDENCE: {confidence_level} ({int(confidence * 100)}%)"
 
     criteria_section = ""
     if coverage_criteria_met:
         items = "\n".join(f"  - {c}" for c in coverage_criteria_met)
-        criteria_section = f"\n\nCOVERAGE CRITERIA MET:\n{items}"
+        criteria_section = f"\n\nPAYER REQUIREMENTS MET:\n{items}"
 
     rationale_section = ""
     if clinical_rationale:
-        rationale_section = f"\n\nCLINICAL RATIONALE:\n{clinical_rationale}"
+        rationale_section = f"\n\nCLINICAL EVIDENCE SUMMARY:\n{clinical_rationale}"
 
     gaps_section = ""
     if documentation_gaps:
@@ -85,7 +84,11 @@ def generate_approval_letter(
         for gap in documentation_gaps:
             what = gap.get("what", "") or gap.get("description", "")
             critical = gap.get("critical", False)
-            label = "REQUIRED" if critical else "Non-critical"
+            # Critical gaps are omitted for ready-to-submit unless staff
+            # explicitly overrode the assessment to ready.
+            if critical and not was_overridden:
+                continue
+            label = "REQUIRED" if critical else "RECOMMENDED"
             items.append(f"  - [{label}] {what}")
         if items:
             gaps_section = "\n\nDOCUMENTATION NOTES:\n" + "\n".join(items)
@@ -93,11 +96,11 @@ def generate_approval_letter(
     override_section = ""
     if was_overridden:
         override_section = f"""\n\n======================================================
-CLINICIAN OVERRIDE NOTICE
+STAFF OVERRIDE NOTICE
 ======================================================
-This decision was OVERRIDDEN by {override_reviewer}.
-Original AI Recommendation: {original_recommendation.replace('_', ' ').upper()}
-Override Decision: APPROVED
+This assessment was OVERRIDDEN by {override_reviewer}.
+Original AI Assessment: {original_recommendation.replace('_', ' ').upper()}
+Staff Decision: READY TO SUBMIT
 
 Override Rationale:
 {override_rationale}"""
@@ -105,50 +108,49 @@ Override Rationale:
     body = f"""{_DISCLAIMER_HEADER}
 
 ======================================================
-PRIOR AUTHORIZATION APPROVAL NOTIFICATION
+PRIOR AUTHORIZATION - READY FOR SUBMISSION
 ======================================================
 
-Authorization Number: {authorization_number}
+Reference Number: {authorization_number}
 Date: {today.isoformat()}
 
-DECISION: ** APPROVED **{confidence_section}
+STATUS: ** READY TO SUBMIT **{confidence_section}
 
 Dear {provider_name} (NPI: {provider_npi}),
 
-This letter confirms that the prior authorization request for the following
-services has been APPROVED.
+The prior authorization preparation for the following services has been
+completed. The request package meets payer documentation requirements
+and is ready for submission.
 
 PATIENT INFORMATION:
   Name: {patient_name}
   Date of Birth: {patient_dob}{insurance_line}
 
-APPROVED SERVICES:
+REQUESTED SERVICES:
   Procedure Code(s): {', '.join(procedure_codes)}
   Diagnosis Code(s): {', '.join(diagnosis_codes)}
 
-AUTHORIZATION PERIOD:
-  Effective Date:  {today.isoformat()}
-  Expiration Date: {expiration.isoformat()}{policy_section}
+REFERENCE VALIDITY:
+  Prepared Date:    {today.isoformat()}
+  Reference Expiry: {expiration.isoformat()}{policy_section}
 
 CLINICAL SUMMARY:
 {summary}{rationale_section}{criteria_section}{gaps_section}{override_section}
 
-TERMS AND CONDITIONS:
-This authorization is valid for the services described above during the
-authorization period. Services must be rendered within the effective dates.
-This authorization does not guarantee payment. Payment is subject to
-eligibility verification at the time of service.
+NEXT STEPS:
+Please submit this prior authorization request to the payer through the
+appropriate channel (portal, clearinghouse, fax, or phone). Reference
+number {authorization_number} should be included in all correspondence.
 
-If you have questions regarding this authorization, please contact the
-utilization management department and reference authorization number
-{authorization_number}.
+This assessment does not guarantee payer approval. Final authorization
+is subject to payer review.
 
 Sincerely,
-Utilization Management Department"""
+Prior Authorization Operations"""
 
     return {
         "authorization_number": authorization_number,
-        "letter_type": "approval",
+        "letter_type": "submission_ready",
         "effective_date": today.isoformat(),
         "expiration_date": expiration.isoformat(),
         "patient_name": patient_name,
@@ -159,7 +161,13 @@ Utilization Management Department"""
     }
 
 
-def generate_pend_letter(
+# Backward-compatible alias
+def generate_approval_letter(*args, **kwargs) -> dict:
+    """Legacy alias for generate_submission_ready_letter."""
+    return generate_submission_ready_letter(*args, **kwargs)
+
+
+def generate_needs_documentation_letter(
     authorization_number: str,
     patient_name: str,
     patient_dob: str,
@@ -182,10 +190,10 @@ def generate_pend_letter(
     override_reviewer: str = "",
     original_recommendation: str = "",
 ) -> dict:
-    """Generate a PEND (request for additional information) notification letter.
+    """Generate a NEEDS DOCUMENTATION provider work item letter.
 
     Returns dict matching NotificationLetter schema.
-    Documentation deadline: today + 30 days.
+    Documentation action deadline: today + 30 days.
     """
     today = date.today()
     deadline = today + timedelta(days=30)
@@ -197,7 +205,7 @@ def generate_pend_letter(
         what = gap.get("what", "") or gap.get("description", "")
         request_text = gap.get("request", "")
         critical = gap.get("critical", False)
-        label = "REQUIRED" if critical else "Requested"
+        label = "REQUIRED" if critical else "Recommended"
         missing_items.append(f"  - [{label}] {what}")
         if request_text:
             missing_items.append(f"    Action: {request_text}")
@@ -208,41 +216,41 @@ def generate_pend_letter(
     policy_section = ""
     if policy_references:
         refs = "\n".join(f"  - {ref}" for ref in policy_references)
-        policy_section = f"\n\nCOVERAGE POLICY REFERENCE:\n{refs}"
+        policy_section = f"\n\nPAYER POLICY REFERENCE:\n{refs}"
 
     confidence_section = ""
     if confidence_level:
-        confidence_section = f"\n\nCONFIDENCE: {confidence_level} ({int(confidence * 100)}%)"
+        confidence_section = f"\n\nASSESSMENT CONFIDENCE: {confidence_level} ({int(confidence * 100)}%)"
 
     rationale_section = ""
     if clinical_rationale:
-        rationale_section = f"\n\nCLINICAL RATIONALE:\n{clinical_rationale}"
+        rationale_section = f"\n\nCLINICAL EVIDENCE SUMMARY:\n{clinical_rationale}"
 
     criteria_met_section = ""
     if coverage_criteria_met:
         items = "\n".join(f"  - {c}" for c in coverage_criteria_met)
-        criteria_met_section = f"\n\nCOVERAGE CRITERIA MET:\n{items}"
+        criteria_met_section = f"\n\nPAYER REQUIREMENTS ALREADY MET:\n{items}"
 
     criteria_not_met_section = ""
     if coverage_criteria_not_met:
         items = "\n".join(f"  - {c}" for c in coverage_criteria_not_met)
-        criteria_not_met_section = f"\n\nCOVERAGE CRITERIA NOT MET:\n{items}"
+        criteria_not_met_section = f"\n\nPAYER REQUIREMENTS NOT YET MET:\n{items}"
 
     appeal_rights = (
-        f"If you disagree with this request for additional information, "
-        f"you may submit a written appeal within 30 days of this notice. "
-        f"Include the reference number {authorization_number} with all "
-        f"correspondence. Documentation deadline: {deadline.isoformat()}."
+        f"If you believe the required documentation is already on file or have "
+        f"questions about these requirements, please contact the prior authorization "
+        f"team and reference number {authorization_number}. "
+        f"Documentation action deadline: {deadline.isoformat()}."
     )
 
     override_section = ""
     if was_overridden:
         override_section = f"""\n\n======================================================
-CLINICIAN OVERRIDE NOTICE
+STAFF OVERRIDE NOTICE
 ======================================================
-This decision was OVERRIDDEN by {override_reviewer}.
-Original AI Recommendation: {original_recommendation.replace('_', ' ').upper()}
-Override Decision: PEND FOR REVIEW
+This assessment was OVERRIDDEN by {override_reviewer}.
+Original AI Assessment: {original_recommendation.replace('_', ' ').upper()}
+Staff Decision: NEEDS DOCUMENTATION REVIEW
 
 Override Rationale:
 {override_rationale}"""
@@ -250,18 +258,19 @@ Override Rationale:
     body = f"""{_DISCLAIMER_HEADER}
 
 ======================================================
-PRIOR AUTHORIZATION - REQUEST FOR ADDITIONAL INFORMATION
+PRIOR AUTHORIZATION - DOCUMENTATION ACTION REQUIRED
 ======================================================
 
 Reference Number: {authorization_number}
 Date: {today.isoformat()}
 
-DECISION: ** PEND FOR REVIEW **{confidence_section}
+STATUS: ** ADDITIONAL DOCUMENTATION NEEDED **{confidence_section}
 
 Dear {provider_name} (NPI: {provider_npi}),
 
-The prior authorization request for the following services has been PENDED
-pending receipt of additional documentation.
+The prior authorization request for the following services requires
+additional documentation before it can be submitted. Please review
+the items listed below and provide or confirm the missing evidence.
 
 PATIENT INFORMATION:
   Name: {patient_name}
@@ -274,26 +283,22 @@ REQUESTED SERVICES:
 CLINICAL SUMMARY:
 {summary}{rationale_section}{criteria_met_section}{criteria_not_met_section}{override_section}
 
-ADDITIONAL DOCUMENTATION REQUIRED:
+DOCUMENTATION ACTION REQUIRED:
 {missing_section}
 
-DEADLINE: Please submit the requested documentation by {deadline.isoformat()}.
+ACTION DEADLINE: {deadline.isoformat()}
+Please provide or confirm the above documentation by this date to
+avoid delays in patient care.
 
-If the required documentation is not received by the deadline, the request
-will be reviewed based on the information currently on file.
-
-APPEAL RIGHTS:
+CONTACT INFORMATION:
 {appeal_rights}
 
-To submit additional documentation, contact the utilization management
-department and reference number {authorization_number}.
-
 Sincerely,
-Utilization Management Department"""
+Prior Authorization Operations"""
 
     return {
         "authorization_number": authorization_number,
-        "letter_type": "pend",
+        "letter_type": "needs_documentation",
         "effective_date": today.isoformat(),
         "expiration_date": None,
         "patient_name": patient_name,
@@ -302,6 +307,12 @@ Utilization Management Department"""
         "appeal_rights": appeal_rights,
         "documentation_deadline": deadline.isoformat(),
     }
+
+
+# Backward-compatible alias
+def generate_pend_letter(*args, **kwargs) -> dict:
+    """Legacy alias for generate_needs_documentation_letter."""
+    return generate_needs_documentation_letter(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +395,7 @@ def generate_letter_pdf(letter_dict: dict) -> str:
 
     Returns base64-encoded PDF string.
     """
-    letter_type = letter_dict.get("letter_type", "approval")
+    letter_type = letter_dict.get("letter_type", "submission_ready")
     auth_number = letter_dict.get("authorization_number", "")
     patient_name = letter_dict.get("patient_name", "")
     provider_name = letter_dict.get("provider_name", "")
@@ -393,22 +404,23 @@ def generate_letter_pdf(letter_dict: dict) -> str:
     appeal_rights = letter_dict.get("appeal_rights")
     doc_deadline = letter_dict.get("documentation_deadline")
 
-    is_approval = letter_type == "approval"
+    # Support both old ("approval") and new ("submission_ready") letter types
+    is_ready = letter_type in ("submission_ready", "approval")
 
     pdf = _LetterPDF(letter_type=letter_type, auth_number=auth_number)
     pdf.alias_nb_pages()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=22)
 
-    # ── Decision status badge ──────────────────────────────────────────
-    if is_approval:
+    # ── Status badge ──────────────────────────────────────────
+    if is_ready:
         badge_bg = _GREEN_BG
-        badge_text = "APPROVED"
-        title_text = "Prior Authorization Approval Notification"
+        badge_text = "READY TO SUBMIT"
+        title_text = "Prior Authorization - Ready for Submission"
     else:
         badge_bg = _AMBER_BG
-        badge_text = "PEND FOR REVIEW"
-        title_text = "Prior Authorization -- Request for Additional Information"
+        badge_text = "DOCUMENTATION NEEDED"
+        title_text = "Prior Authorization -- Documentation Action Required"
 
     # Title
     pdf.set_font("Helvetica", "B", 14)
@@ -416,7 +428,7 @@ def generate_letter_pdf(letter_dict: dict) -> str:
     pdf.cell(0, 9, title_text, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(3)
 
-    # Decision badge — centered colored pill
+    # Status badge — centered colored pill
     badge_w = 70
     badge_x = (210 - badge_w) / 2
     badge_y = pdf.get_y()
@@ -448,7 +460,7 @@ def generate_letter_pdf(letter_dict: dict) -> str:
     pdf.ln(5)
 
     # ── Reference info row ─────────────────────────────────────────────
-    ref_label = "Authorization No." if is_approval else "Reference No."
+    ref_label = "Reference No."
     _info_row(pdf, [
         (ref_label, auth_number),
         ("Date", effective_date),
@@ -480,7 +492,7 @@ def generate_letter_pdf(letter_dict: dict) -> str:
     procedure_codes = letter_dict.get("procedure_codes", [])
     diagnosis_codes = letter_dict.get("diagnosis_codes", [])
     if procedure_codes or diagnosis_codes:
-        heading = "Approved Services" if is_approval else "Requested Services"
+        heading = "Requested Services"
         _section_heading(pdf, heading)
 
         col_w = [35, 155]
@@ -512,12 +524,12 @@ def generate_letter_pdf(letter_dict: dict) -> str:
                            new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.ln(3)
 
-    # ── Authorization period (approval) ────────────────────────────────
-    if is_approval and expiration_date:
-        _section_heading(pdf, "Authorization Period")
+    # ── Reference validity (submission-ready) ──────────────────────────
+    if is_ready and expiration_date:
+        _section_heading(pdf, "Reference Validity")
         _info_row(pdf, [
-            ("Effective Date", effective_date),
-            ("Expiration Date", expiration_date),
+            ("Prepared Date", effective_date),
+            ("Reference Expiry", expiration_date),
         ])
         pdf.ln(5)
 
@@ -607,7 +619,7 @@ def generate_letter_pdf(letter_dict: dict) -> str:
         pdf.ln(4)
 
     # ── Documentation notes (for approval — non-critical gaps) ────────
-    if is_approval:
+    if is_ready:
         doc_gaps = letter_dict.get("documentation_gaps", [])
         if doc_gaps:
             _section_heading(pdf, "Documentation Notes")
@@ -632,7 +644,7 @@ def generate_letter_pdf(letter_dict: dict) -> str:
             pdf.ln(4)
 
     # ── Additional documentation required (pend) ───────────────────────
-    if not is_approval:
+    if not is_ready:
         doc_gaps = letter_dict.get("documentation_gaps", [])
         if doc_gaps:
             _section_heading(pdf, "Additional Documentation Required")
@@ -684,7 +696,7 @@ def generate_letter_pdf(letter_dict: dict) -> str:
         pdf.ln(4)
 
     # ── Terms and conditions (approval) ────────────────────────────────
-    if is_approval:
+    if is_ready:
         _section_heading(pdf, "Terms and Conditions")
         pdf.set_font("Helvetica", "", 8)
         pdf.set_text_color(*_TEXT_LIGHT)

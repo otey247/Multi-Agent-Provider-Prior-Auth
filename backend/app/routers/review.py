@@ -88,10 +88,10 @@ def _build_review_response(request_id: str, result: dict) -> ReviewResponse:
 
     return ReviewResponse(
         request_id=request_id,
-        recommendation=result.get("recommendation", "pend_for_review"),
+        recommendation=result.get("recommendation", "needs_review"),
         confidence=result.get("confidence", 0.0),
         confidence_level=result.get("confidence_level", ""),
-        summary=result.get("summary", "Review completed."),
+        summary=result.get("summary", "Assessment completed."),
         tool_results=tool_results,
         clinical_rationale=result.get("clinical_rationale", ""),
         coverage_criteria_met=result.get("coverage_criteria_met", []),
@@ -104,10 +104,9 @@ def _build_review_response(request_id: str, result: dict) -> ReviewResponse:
         synthesis_audit_trail=result.get("synthesis_audit_trail", {}),
         disclaimer=result.get(
             "disclaimer",
-            "AI-assisted draft. Coverage policies reflect Medicare LCDs/NCDs only. "
-            "If this review is for a commercial or Medicare Advantage plan, "
-            "payer-specific policies may differ. Human clinical review required "
-            "before final determination.",
+            "AI-assisted draft. Payer policies reflect Medicare LCDs/NCDs only. "
+            "Commercial and Medicare Advantage plans may have different requirements. "
+            "Human review required before submission.",
         ),
         agent_results=agent_results,
         audit_trail=audit_trail,
@@ -118,15 +117,15 @@ def _build_review_response(request_id: str, result: dict) -> ReviewResponse:
 
 @router.post("/review", response_model=ReviewResponse)
 async def submit_review(request: PriorAuthRequest):
-    """Submit a prior authorization request for multi-agent AI-assisted review.
+    """Submit a prior authorization request for multi-agent AI-assisted preparation.
 
-    Three specialized agents (Compliance, Clinical Reviewer, Coverage) run
-    in a fan-out/fan-in pattern. An orchestrator synthesizes their outputs
-    into a final APPROVE or PEND recommendation using a gate-based decision
-    rubric with confidence scoring.
+    Three specialized agents (Documentation Completeness, Clinical Evidence Retrieval,
+    Policy Matching) run in a fan-out/fan-in pattern. An orchestrator synthesizes
+    their outputs into a submission readiness assessment using a gate-based rubric
+    with confidence scoring.
 
-    Returns the structured decision along with per-agent breakdowns, audit
-    trail, and an audit justification document.
+    Returns the structured assessment along with per-agent breakdowns, audit
+    trail, and a submission readiness document.
     """
     request_id = str(uuid.uuid4())
 
@@ -148,7 +147,7 @@ async def submit_review(request: PriorAuthRequest):
 
 @router.post("/review/stream")
 async def submit_review_stream(request: PriorAuthRequest, http_request: Request):
-    """Stream prior authorization review progress via Server-Sent Events.
+    """Stream prior authorization preparation progress via Server-Sent Events.
 
     Emits progress events as the multi-agent pipeline runs, then sends
     the final ReviewResponse as an 'event: result' SSE event.

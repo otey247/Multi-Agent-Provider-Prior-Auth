@@ -125,10 +125,12 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
         setLoading(false);
         setProgress(null);
         onReviewComplete(result);
-        toast.success("Review complete", {
-          description: result.recommendation === "approve"
-            ? "Recommendation: Approve"
-            : "Recommendation: Pend for Review",
+        const rec = result.recommendation;
+        const isReady = rec === "ready_to_submit" || rec === "approve";
+        toast.success("Assessment complete", {
+          description: isReady
+            ? "Status: Ready to Submit"
+            : "Status: Needs Review",
         });
       },
       (errMsg) => {
@@ -146,10 +148,10 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
         <div>
           <CardTitle className="text-lg flex items-center gap-2">
             <FileText className="h-5 w-5 text-primary" />
-            New Authorization Request
+            New Prior Authorization Request
           </CardTitle>
           <p className="text-sm text-muted-foreground mt-1">
-            Enter patient and procedure details for AI-assisted clinical review
+            Enter patient and service details for AI-assisted prior auth preparation
           </p>
         </div>
         <Button variant="secondary" size="sm" onClick={loadSample}>
@@ -307,7 +309,7 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
           {/* Section divider: Clinical Information */}
           <div className="relative">
             <div className="absolute inset-0 flex items-center"><span className="w-full border-t" /></div>
-            <div className="relative flex justify-center text-xs uppercase"><span className="bg-card px-2 text-muted-foreground">Clinical Information</span></div>
+            <div className="relative flex justify-center text-xs uppercase"><span className="bg-card px-2 text-muted-foreground">Clinical Documentation</span></div>
           </div>
 
           {/* Clinical notes */}
@@ -319,7 +321,7 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
             <Textarea
               id="clinical_notes"
               rows={5}
-              placeholder="Enter clinical notes, history of present illness, prior treatments..."
+              placeholder="Enter clinical notes, history of present illness, prior treatments, diagnostic findings..."
               value={form.clinical_notes}
               onChange={(e) => updateField("clinical_notes", e.target.value)}
               required
@@ -345,7 +347,7 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
             ) : (
               <Send className="mr-2 h-4 w-4" />
             )}
-            {loading ? "Submitting for Review..." : "Submit for Review"}
+            {loading ? "Running Assessment..." : "Assess Prior Auth Request"}
           </Button>
         </form>
       </CardContent>

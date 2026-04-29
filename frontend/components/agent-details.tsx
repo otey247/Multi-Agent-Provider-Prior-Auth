@@ -897,16 +897,16 @@ function getGateStatuses(decisionGate: string): [GateStatus, GateStatus, GateSta
 
 const GATES = [
   {
-    label: "Gate 1 — Provider Verification",
+    label: "Gate 1 — Provider Credential Check",
     description: "NPI valid and active in NPPES registry",
   },
   {
-    label: "Gate 2 — Code Validation",
+    label: "Gate 2 — Code and Order Validation",
     description: "All ICD-10 and CPT/HCPCS codes valid and billable",
   },
   {
-    label: "Gate 3 — Medical Necessity",
-    description: "All coverage criteria MET with sufficient clinical evidence",
+    label: "Gate 3 — Payer Policy Requirements",
+    description: "All payer requirements MET with sufficient clinical evidence",
   },
 ];
 
@@ -917,7 +917,7 @@ function GateIcon({ status }: { status: GateStatus }) {
 }
 
 function SynthesisTab({ data }: { data: SynthesisData }) {
-  const isApprove = data.recommendation === "approve";
+  const isReadyToSubmit = data.recommendation === "ready_to_submit" || data.recommendation === "approve";
   const confidenceVal = data.confidence <= 1
     ? Math.round(data.confidence * 100)
     : Math.round(data.confidence);
@@ -926,14 +926,14 @@ function SynthesisTab({ data }: { data: SynthesisData }) {
 
   return (
     <div className="space-y-5 pt-4">
-      {/* Decision + confidence header */}
+      {/* Assessment + confidence header */}
       <div className="space-y-2">
         <div className="flex items-center gap-3 flex-wrap">
           <Badge
-            variant={isApprove ? "success" : "warning"}
+            variant={isReadyToSubmit ? "success" : "warning"}
             className="text-sm px-3 py-1"
           >
-            {isApprove ? "APPROVE" : "PEND FOR REVIEW"}
+            {isReadyToSubmit ? "READY TO SUBMIT" : "NEEDS REVIEW"}
           </Badge>
           <Badge variant="outline">{data.confidence_level}</Badge>
           {data.criteria_summary && (
@@ -947,7 +947,7 @@ function SynthesisTab({ data }: { data: SynthesisData }) {
       <div className="space-y-2">
         <h4 className="text-sm font-semibold flex items-center gap-1.5">
           <GitBranch className="h-4 w-4 text-primary" />
-          Decision Gate Pipeline
+          Submission Readiness Gate Pipeline
         </h4>
         <div className="space-y-2">
           {GATES.map((gate, i) => {
@@ -986,10 +986,10 @@ function SynthesisTab({ data }: { data: SynthesisData }) {
         </div>
       </div>
 
-      {/* Clinical rationale */}
+      {/* Clinical evidence rationale */}
       {data.clinical_rationale && (
         <CollapsibleSection
-          title="Clinical Rationale"
+          title="Clinical Evidence Rationale"
           icon={ScrollText}
           defaultOpen
         >
@@ -1002,7 +1002,7 @@ function SynthesisTab({ data }: { data: SynthesisData }) {
       {/* Missing documentation */}
       {missingDocs.length > 0 && (
         <CollapsibleSection
-          title={`Missing Documentation (${missingDocs.length})`}
+          title={`Documentation Action Required (${missingDocs.length})`}
           icon={AlertTriangle}
         >
           <ul className="space-y-1.5">
@@ -1063,10 +1063,10 @@ function SynthesisTab({ data }: { data: SynthesisData }) {
 
 export function AgentDetails({ results, synthesis }: AgentDetailsProps) {
   const tabs = [
-    { id: "compliance", label: "Compliance", icon: ClipboardCheck, data: results.compliance },
-    { id: "clinical",   label: "Clinical",   icon: Stethoscope,    data: results.clinical },
-    { id: "coverage",   label: "Coverage",   icon: Shield,          data: results.coverage },
-    ...(synthesis ? [{ id: "synthesis", label: "Synthesis", icon: GitBranch, data: synthesis as object }] : []),
+    { id: "compliance", label: "Doc. Completeness", icon: ClipboardCheck, data: results.compliance },
+    { id: "clinical",   label: "Clinical Evidence", icon: Stethoscope,    data: results.clinical },
+    { id: "coverage",   label: "Policy Matching",   icon: Shield,          data: results.coverage },
+    ...(synthesis ? [{ id: "synthesis", label: "Submission Readiness", icon: GitBranch, data: synthesis as object }] : []),
   ].filter((t) => t.data);
 
   if (tabs.length === 0) return null;

@@ -17,15 +17,15 @@ export function Header() {
           <div>
             <div className="flex flex-wrap items-center gap-3">
               <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
-                Prior Authorization Review
+                Provider Prior Authorization
               </h1>
               <Badge className="bg-white/20 text-white border-white/30 text-[10px] uppercase tracking-widest">
                 AI-Powered
               </Badge>
             </div>
             <p className="mt-2 text-sm text-blue-100/90 max-w-lg">
-              Multi-agent clinical review powered by Azure OpenAI gpt-5.4 &amp; Microsoft
-              Agent Framework with real-time MCP verification
+              Multi-agent prior auth preparation powered by Azure OpenAI gpt-5.4 &amp; Microsoft
+              Agent Framework — prepare, validate, and submit auth requests to payers
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-blue-200/80">
               <Sparkles className="h-3 w-3" />
@@ -33,7 +33,7 @@ export function Header() {
               <span className="mx-1">&#183;</span>
               <span>5 MCP data sources</span>
               <span className="mx-1">&#183;</span>
-              <span>Gate-based decision rubric</span>
+              <span>Submission readiness gates</span>
             </div>
           </div>
         </div>

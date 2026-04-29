@@ -1,10 +1,12 @@
-# Prior Authorization Multi-Agent Solution Accelerator
+# Provider Prior Authorization Multi-Agent Solution Accelerator
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 &nbsp;[![Azure](https://img.shields.io/badge/Azure-Deployable-blue?logo=microsoftazure)](https://azure.microsoft.com)
 &nbsp;[![Agent Framework](https://img.shields.io/badge/Microsoft-Agent%20Framework-purple)](https://learn.microsoft.com/agent-framework/)
 
-A multi-agent AI solution that automates **prior authorization** for health plan payers. Four specialized **Foundry Hosted Agents** — Compliance, Clinical Reviewer, Coverage, and Synthesis — evaluate PA requests against coverage policies and produce auditable approve/pend recommendations in under 2 minutes. Built with **Microsoft Foundry**, the **Microsoft Agent Framework (MAF)**, **Azure Container Apps**, and **MCP healthcare data servers**.
+A **provider-side** multi-agent AI solution that helps clinics, hospitals, specialty practices, and revenue cycle teams prepare, validate, and submit prior authorization requests to payers. Four specialized **Foundry Hosted Agents** — Documentation Completeness, Clinical Evidence Retrieval, Policy Matching, and Submission Readiness — assess whether a prior auth package is complete and ready to submit, producing auditable ready-to-submit / needs-review assessments in under 2 minutes. Built with **Microsoft Foundry**, the **Microsoft Agent Framework (MAF)**, **Azure Container Apps**, and **MCP healthcare data servers**.
+
+> **Provider-side vs. payer-side:** A payer-side system asks "Should this request be approved or denied?" A **provider-side** system asks "How do we get the right authorization approved as quickly and correctly as possible?" This solution helps providers prepare complete, evidence-backed prior auth packages — it is not a coverage determination engine.
 
 The solution supports **two runtime modes**:
 
@@ -13,7 +15,7 @@ The solution supports **two runtime modes**:
 | **Foundry Hosted Agent** (recommended) | `azd up` | Agents are registered with Microsoft Foundry Hosted Agents; Foundry manages container lifecycle. Backend dispatches through the Foundry project endpoint using `agent_reference` routing and `DefaultAzureCredential`. |
 | **Local / Docker Compose** | `docker compose up` | All 4 agent containers + backend + frontend run locally — no Azure deployment needed. |
 
-Decision policy and evaluation methodology adapted from the [Anthropic prior-auth-review-skill](https://github.com/anthropics/healthcare/tree/main/prior-auth-review-skill): LENIENT mode decision policy, per-criterion MET/NOT_MET/INSUFFICIENT evaluation, confidence scoring, progressive gate evaluation, structured audit trails, NCCI bundling risk flagging, service-type classification, and provider specialty-procedure appropriateness as an auditable criterion.
+Decision policy and evaluation methodology adapted from the [Anthropic prior-auth-review-skill](https://github.com/anthropics/healthcare/tree/main/prior-auth-review-skill): submission readiness gate evaluation, per-criterion MET/NOT_MET/INSUFFICIENT status, confidence scoring, progressive gate evaluation, structured audit trails, NCCI bundling risk flagging, service-type classification, and provider specialty-procedure appropriateness as an auditable criterion.
 
 <div align="center">
 
@@ -29,16 +31,18 @@ Decision policy and evaluation methodology adapted from the [Anthropic prior-aut
 <a id="features"></a>
 ## Features
 
-- **Multi-agent parallel execution** — Four specialized agents complete a full PA review in under 2 minutes; Compliance and Clinical agents run concurrently via `asyncio.gather`
+- **Provider-side prior auth workflow** — Helps clinics and hospitals prepare, validate, and submit prior auth packages; not a payer coverage determination engine
+- **Multi-agent parallel execution** — Four specialized agents complete a full prior auth assessment in under 2 minutes; Documentation Completeness and Clinical Evidence Retrieval agents run concurrently via `asyncio.gather`
 - **Foundry Hosted Agents** — Each specialist agent is independently containerized and deployed on Microsoft Foundry; Foundry manages the container lifecycle
-- **Gate-based decision rubric** — Three sequential gates (Provider → Codes → Medical Necessity) with per-criterion MET/NOT_MET/INSUFFICIENT scoring and confidence weighting
+- **Gate-based submission readiness evaluation** — Three sequential gates (Provider Credentials → Code Validation → Payer Policy Requirements) with per-criterion MET/NOT_MET/INSUFFICIENT scoring and confidence weighting
 - **MCP-powered data access** — Five remote MCP healthcare data servers: NPI Registry, ICD-10 Codes, CMS Coverage, Clinical Trials (DeepSense), and PubMed
-- **Human-in-the-loop** — AI produces draft recommendations; clinicians Accept or Override with documented rationale; override traceability flows to audit PDF and notification letters
+- **Human-in-the-loop** — AI produces draft assessments; staff accept or revise with documented rationale; override traceability flows to audit PDF and provider letters
+- **Evidence-grounded** — Clinical Evidence Retrieval Agent reports only what is documented; never invents clinical facts; identifies missing evidence explicitly
 - **Keyless authentication** — All Azure resource access via `DefaultAzureCredential`; no API keys, passwords, or connection strings stored or rotated
-- **Full audit trail** — 10-item compliance checklist, per-criterion confidence scoring, and an 8-section audit justification document (Markdown + color-coded PDF)
+- **Full audit trail** — 10-item documentation completeness checklist, per-criterion confidence scoring, and an 8-section submission readiness report (Markdown + color-coded PDF)
 - **Real-time progress streaming** — SSE-based live updates with a phase timeline and per-agent status cards across all four agent phases
 - **OpenTelemetry observability** — Native Application Insights integration with custom phase spans and semantic attributes
-- **Skills-based architecture** — Agent behaviors defined in `SKILL.md` files; domain experts can update clinical rules without code changes
+- **Skills-based architecture** — Agent behaviors defined in `SKILL.md` files; domain experts can update payer policy rules without code changes
 - **Two runtime modes** — Deploy to Azure with `azd up` (Foundry Hosted Agents) or run everything locally with `docker compose up`
 
 ---
@@ -80,7 +84,7 @@ This solution uses a **stateless dispatcher** pattern: the FastAPI backend has n
 
 ### Responsible AI
 
-This is an **AI-assisted triage tool** — all recommendations are drafts that require human clinical review before any authorization decision is finalized. Coverage policies reflect Medicare LCDs/NCDs only; commercial and Medicare Advantage plans may differ. See [TRANSPARENCY_FAQ.md](./TRANSPARENCY_FAQ.md) for full responsible AI transparency details.
+This is an **AI-assisted prior auth preparation tool** — all assessments are drafts that require human review before submitting to a payer. The system never makes coverage determinations; that is the payer's role. Coverage policy matching reflects Medicare LCDs/NCDs only; commercial and Medicare Advantage plans may differ. The Clinical Evidence Retrieval Agent is designed to report only evidence that is explicitly documented — it does not invent or fabricate clinical facts. See [TRANSPARENCY_FAQ.md](./TRANSPARENCY_FAQ.md) for full responsible AI transparency details.
 
 ---
 
@@ -103,7 +107,7 @@ This is an **AI-assisted triage tool** — all recommendations are drafts that r
 <a id="solution-overview"></a>
 ## <img src="./docs/images/readme/solution-overview.svg" width="48" /> Solution overview
 
-This solution leverages **Microsoft Foundry**, the **Microsoft Agent Framework (MAF)**, **Azure Application Insights**, and **MCP healthcare data servers** to create an intelligent prior authorization review pipeline where four specialized AI agents work together to validate, assess, and synthesize PA decisions with full audit transparency and native OpenTelemetry tracing. Each specialist agent is independently containerized and deployed as a Foundry Hosted Agent, while the FastAPI orchestrator and Next.js frontend run in Azure Container Apps.
+This solution leverages **Microsoft Foundry**, the **Microsoft Agent Framework (MAF)**, **Azure Application Insights**, and **MCP healthcare data servers** to create an intelligent provider-side prior authorization preparation pipeline where four specialized AI agents work together to validate documentation, retrieve clinical evidence, match payer requirements, and assess submission readiness — with full audit transparency and native OpenTelemetry tracing. Each specialist agent is independently containerized and deployed as a Foundry Hosted Agent, while the FastAPI orchestrator and Next.js frontend run in Azure Container Apps.
 
 ### Solution architecture
 
@@ -113,6 +117,13 @@ This solution leverages **Microsoft Foundry**, the **Microsoft Agent Framework (
 ### Agentic architecture
 
 The orchestrator coordinates four phases with four specialized agents:
+
+| Agent | Provider-Side Role |
+|-------|-------------------|
+| Documentation Completeness Agent | Verifies that the request package has all required fields (patient info, NPI, codes, clinical notes) before wasting payer capacity |
+| Clinical Evidence Retrieval Agent | Extracts and validates clinical evidence from the submitted notes — reports only what is documented, never invents facts |
+| Policy Matching Agent | Verifies provider credentials and maps clinical evidence against known payer requirements (Medicare LCDs/NCDs) |
+| Submission Readiness Agent | Aggregates all agent outputs through three readiness gates and produces ready-to-submit / needs-review with confidence scoring |
 
 <p align="center">
   <img src="./docs/images/readme/agentic-architecture.svg" alt="Agentic Architecture" />
@@ -127,7 +138,7 @@ The orchestrator coordinates four phases with four specialized agents:
 | [Azure OpenAI GPT-5.4 in Microsoft Foundry](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-gpt-5-4-in-microsoft-foundry/4499785) | GPT-5.4 model announcement and capabilities |
 | [Microsoft Agent Framework Documentation](https://learn.microsoft.com/en-us/agent-framework/) | Official MAF documentation and getting started guides |
 | [Anthropic Healthcare MCP Marketplace](https://github.com/anthropics/healthcare) | MCP healthcare data tools (MCP data tools, not the AI model) |
-| [Prior Auth Review Skill](https://github.com/anthropics/healthcare/tree/main/prior-auth-review-skill) | Original methodology reference for decision policy and evaluation criteria |
+| [Prior Auth Review Skill](https://github.com/anthropics/healthcare/tree/main/prior-auth-review-skill) | Original methodology reference for evaluation criteria and confidence scoring |
 | [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) | MCP specification and tooling |
 
 <br/>
@@ -135,12 +146,21 @@ The orchestrator coordinates four phases with four specialized agents:
 ### Key features
 
 <details open>
+  <summary><b>Provider-side prior auth workflow</b></summary>
+
+  - Helps clinics, hospitals, specialty practices, and RCM teams prepare complete PA packages before submission
+  - Not a coverage determination engine — the payer makes the final decision; this system helps the provider team present the strongest, most complete submission
+  - Evidence-grounded: the Clinical Evidence Retrieval Agent only reports what is documented in the clinical notes; it explicitly identifies missing evidence
+  - Human review required before submission: staff accept or revise the AI assessment
+</details>
+
+<details open>
   <summary><b>Multi-agent parallel execution</b></summary>
 
-  - Compliance and Clinical agents run concurrently via `asyncio.gather`, reducing wall-clock time from 20+ minutes to under 2 minutes per case
-  - Coverage Agent runs sequentially after clinical findings are available
-  - Synthesis Agent executes the gate-based rubric to generate the final recommendation and confidence
-  - Four-phase pipeline: Pre-flight → Parallel → Sequential → Synthesis → Audit
+  - Documentation Completeness and Clinical Evidence Retrieval agents run concurrently via `asyncio.gather`, reducing wall-clock time from 20+ minutes to under 2 minutes per case
+  - Policy Matching Agent runs sequentially after clinical findings are available
+  - Submission Readiness Agent executes the gate-based rubric to generate the final assessment and confidence
+  - Four-phase pipeline: Pre-flight → Parallel → Policy Matching → Submission Readiness → Readiness Report
 </details>
 
 <details>
@@ -158,13 +178,13 @@ The orchestrator coordinates four phases with four specialized agents:
 <details>
   <summary><b>Skills-based architecture</b></summary>
 
-  - Agent behaviors defined in SKILL.md files — domain experts can update clinical rules without code changes
+  - Agent behaviors defined in SKILL.md files — domain experts can update payer policy rules without code changes
   - SKILL.md files live alongside each agent container under `agents/<name>/skills/<skill-name>/SKILL.md`
   - Loaded at agent startup via MAF `SkillsProvider` — no backend code changes needed to update clinical rules
-  - Compliance skill: 10-item checklist (NCCI bundling + service type classification added as items 9 and 10)
-  - Coverage skill: Provider Specialty-Procedure Appropriateness is now a required explicit criterion (Step 1.4)
-  - Clinical skill: low-confidence extraction banner when `extraction_confidence < 60%` surfaces directly in the frontend Clinical tab
-  - Synthesis skill: emits `synthesis_audit_trail` (gate results + weighted confidence breakdown) visible in the frontend Synthesis tab
+  - Documentation Completeness skill: 10-item checklist (NCCI bundling + service type classification added as items 9 and 10)
+  - Policy Matching skill: Provider Specialty-Procedure Appropriateness is a required explicit criterion (Step 1.4)
+  - Clinical Evidence Retrieval skill: low-confidence extraction banner when `extraction_confidence < 60%` surfaces directly in the frontend Clinical tab
+  - Submission Readiness skill: emits `synthesis_audit_trail` (gate results + weighted confidence breakdown) visible in the frontend Synthesis tab
 </details>
 
 <details>
@@ -179,29 +199,28 @@ The orchestrator coordinates four phases with four specialized agents:
 </details>
 
 <details>
-  <summary><b>Gate-based decision rubric</b></summary>
+  <summary><b>Gate-based submission readiness evaluation</b></summary>
 
-  - Three sequential gates: Provider → Codes → Medical Necessity
-  - LENIENT mode: only APPROVE or PEND — never DENY
+  - Three sequential gates: Provider Credentials → Code and Order Validation → Payer Policy Requirements
+  - Submission readiness: only READY_TO_SUBMIT or NEEDS_REVIEW — never makes coverage approvals or denials
   - Per-criterion MET/NOT_MET/INSUFFICIENT assessment with confidence scoring
-  - Configurable: switch to STRICT mode (adds DENY) via configuration toggle
 </details>
 
 <details>
-  <summary><b>Human-in-the-loop decision panel</b></summary>
+  <summary><b>Human-in-the-loop staff review panel</b></summary>
 
-  - Accept or Override the AI recommendation with documented rationale
-  - Override traceability: flows to notification letters, audit PDF, and API response
-  - Authorization number generation (PA-YYYYMMDD-XXXXX)
-  - PDF notification letters (approval and pend) with clinical justification data
-  - All four agents visible in tabbed Agent Details: Compliance checklist, Clinical extraction (with low-confidence banner), Coverage criteria (including specialty-procedure match), and **Synthesis** gate pipeline + weighted confidence breakdown + disclaimer
+  - Accept or Revise the AI assessment with documented rationale
+  - Override traceability: flows to provider letters, audit PDF, and API response
+  - Reference number generation (PA-YYYYMMDD-XXXXX)
+  - PDF provider letters (submission ready and documentation needed) with clinical evidence data
+  - All four agents visible in tabbed Agent Details: Documentation Completeness checklist, Clinical Evidence extraction (with low-confidence banner), Policy Matching criteria (including specialty-procedure match), and **Submission Readiness** gate pipeline + weighted confidence breakdown + disclaimer
 </details>
 
 <details>
   <summary><b>Audit and compliance</b></summary>
 
-  - 10-item compliance checklist with blocking/non-blocking classification; items 9 (NCCI bundling risk) and 10 (service type classification) are new domain-aware improvements over the baseline Anthropic skill
-  - Provider Specialty-Procedure Appropriateness as a required, auditable `criteria_assessment` entry in the Coverage Agent — sourced from NPI Registry taxonomy
+  - 10-item documentation completeness checklist with blocking/non-blocking classification; items 9 (NCCI bundling risk) and 10 (service type classification) are domain-aware improvements over the baseline Anthropic skill
+  - Provider Specialty-Procedure Appropriateness as a required, auditable `criteria_assessment` entry in the Policy Matching Agent — sourced from NPI Registry taxonomy
   - Per-criterion confidence scoring with weighted formula (40% criteria + 30% extraction + 20% compliance + 10% policy)
   - `synthesis_audit_trail` with `gate_results` and `confidence_components` surfaced in the frontend Synthesis tab
   - 8-section audit justification document (Markdown + color-coded PDF)
