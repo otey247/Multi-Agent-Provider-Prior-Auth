@@ -194,7 +194,7 @@ class ReviewResponse(BaseModel):
     documentation_gaps: list[DocumentationGap] = []
     policy_references: list[str] = []
     decision_gate: str = ""  # "gate_1_provider", "gate_2_codes", "gate_3_necessity", "approved"
-    criteria_summary: str = ""  # e.g. "8 of 8 criteria MET"
+    criteria_summary: str = ""  # e.g. "8 of 8 requirements met"
     synthesis_audit_trail: dict = {}  # gate_results + confidence_components from synthesis agent
     disclaimer: str = "AI-assisted draft. Payer policies applied for Medicare LCDs/NCDs. Human review required before submission."
     agent_results: AgentResults | None = None
@@ -209,7 +209,7 @@ class ReviewResponse(BaseModel):
 class DecisionRequest(BaseModel):
     """POST /api/decision request body."""
     request_id: str
-    action: str  # "submit" or "revise"
+    action: str  # "submit" or "revise"; legacy "accept"/"override" are normalized
     override_recommendation: str | None = None  # "ready_to_submit" or "needs_review"
     override_rationale: str | None = None
     reviewer_name: str

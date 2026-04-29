@@ -73,7 +73,7 @@ async def submit_decision(request: DecisionRequest):
     else:
         raise HTTPException(
             status_code=422,
-            detail="action must be 'submit' or 'revise'",
+            detail="action must be one of 'accept', 'submit', 'override', or 'revise'",
         )
 
     # Generate authorization number

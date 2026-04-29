@@ -84,7 +84,9 @@ def generate_submission_ready_letter(
         for gap in documentation_gaps:
             what = gap.get("what", "") or gap.get("description", "")
             critical = gap.get("critical", False)
-            label = "NOTE" if not critical else "ACTION RECOMMENDED"
+            if critical and not was_overridden:
+                continue
+            label = "REQUIRED" if critical else "RECOMMENDED"
             items.append(f"  - [{label}] {what}")
         if items:
             gaps_section = "\n\nDOCUMENTATION NOTES:\n" + "\n".join(items)
@@ -520,12 +522,12 @@ def generate_letter_pdf(letter_dict: dict) -> str:
                            new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.ln(3)
 
-    # ── Authorization period (approval) ────────────────────────────────
+    # ── Reference validity (submission-ready) ──────────────────────────
     if is_ready and expiration_date:
-        _section_heading(pdf, "Authorization Period")
+        _section_heading(pdf, "Reference Validity")
         _info_row(pdf, [
-            ("Effective Date", effective_date),
-            ("Expiration Date", expiration_date),
+            ("Prepared Date", effective_date),
+            ("Reference Expiry", expiration_date),
         ])
         pdf.ln(5)
 
