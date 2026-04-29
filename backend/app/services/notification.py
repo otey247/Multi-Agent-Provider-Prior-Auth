@@ -84,8 +84,8 @@ def generate_submission_ready_letter(
         for gap in documentation_gaps:
             what = gap.get("what", "") or gap.get("description", "")
             critical = gap.get("critical", False)
-            # Ready-to-submit letters should not show unresolved critical gaps
-            # unless staff explicitly overrode the assessment to ready.
+            # Critical gaps are omitted for ready-to-submit unless staff
+            # explicitly overrode the assessment to ready.
             if critical and not was_overridden:
                 continue
             label = "REQUIRED" if critical else "RECOMMENDED"
