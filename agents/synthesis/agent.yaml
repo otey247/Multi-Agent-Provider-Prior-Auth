@@ -1,0 +1,31 @@
+# Foundry Hosted Agent descriptor — Synthesis Decision Agent
+# Deploy with: az ai agent deploy --file agent.yaml
+#
+# No MCP connections — synthesis is pure reasoning over agent outputs.
+# No Foundry Tool MCP registration required.
+
+name: synthesis-agent
+description: >
+  Synthesizes outputs from Compliance, Clinical Reviewer, and Coverage agents
+  into a final APPROVE or PEND recommendation using 3-gate evaluation
+  (Provider → Codes → Medical Necessity), weighted confidence scoring,
+  and a structured audit trail.
+runtime: agent-framework
+version: "1.0.0"
+
+resources:
+  cpu: "1"
+  memory: "2Gi"
+
+env:
+  # Microsoft Foundry project endpoint (injected by Foundry at deploy time)
+  - name: AZURE_AI_PROJECT_ENDPOINT
+    secretRef: azure-ai-project-endpoint
+
+  # Model deployment to use (gpt-5.4 recommended for synthesis and decision scoring)
+  - name: AZURE_OPENAI_DEPLOYMENT_NAME
+    value: gpt-5.4
+
+  # Azure Application Insights (optional)
+  - name: APPLICATION_INSIGHTS_CONNECTION_STRING
+    secretRef: app-insights-connection-string

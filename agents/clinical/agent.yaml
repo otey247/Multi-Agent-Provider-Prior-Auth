@@ -1,0 +1,42 @@
+# Foundry Hosted Agent descriptor — Clinical Reviewer Agent
+# Deploy with: az ai agent deploy --file agent.yaml
+#
+# MCP connections: self-managed via MCPStreamableHTTPTool in main.py
+# No Foundry Tool MCP registration required for DeepSense servers.
+
+name: clinical-reviewer-agent
+description: >
+  Validates ICD-10 diagnosis codes, extracts clinical indicators with
+  confidence scoring, searches PubMed literature and ClinicalTrials.gov,
+  and returns a structured clinical profile for downstream coverage assessment.
+runtime: agent-framework
+version: "1.0.0"
+
+resources:
+  cpu: "1"
+  memory: "2Gi"
+
+env:
+  # Microsoft Foundry project endpoint (injected by Foundry at deploy time)
+  - name: AZURE_AI_PROJECT_ENDPOINT
+    secretRef: azure-ai-project-endpoint
+
+  # Model deployment to use (gpt-5.4 recommended for clinical reasoning depth)
+  - name: AZURE_OPENAI_DEPLOYMENT_NAME
+    value: gpt-5.4
+
+  # DeepSense ICD-10 MCP server
+  - name: MCP_ICD10_CODES
+    value: https://mcp.deepsense.ai/icd10_codes/mcp
+
+  # Anthropic PubMed MCP server
+  - name: MCP_PUBMED
+    value: https://pubmed.mcp.claude.com/mcp
+
+  # DeepSense Clinical Trials MCP server
+  - name: MCP_CLINICAL_TRIALS
+    value: https://mcp.deepsense.ai/clinical_trials/mcp
+
+  # Azure Application Insights (optional)
+  - name: APPLICATION_INSIGHTS_CONNECTION_STRING
+    secretRef: app-insights-connection-string

@@ -1,0 +1,38 @@
+# Foundry Hosted Agent descriptor — Coverage Assessment Agent
+# Deploy with: az ai agent deploy --file agent.yaml
+#
+# MCP connections: self-managed via MCPStreamableHTTPTool in main.py
+# No Foundry Tool MCP registration required for DeepSense servers.
+
+name: coverage-assessment-agent
+description: >
+  Verifies provider NPI credentials, searches Medicare NCDs/LCDs via CMS
+  Coverage MCP, maps clinical findings to policy criteria with
+  MET/NOT_MET/INSUFFICIENT assessment, and produces documentation gap analysis.
+runtime: agent-framework
+version: "1.0.0"
+
+resources:
+  cpu: "1"
+  memory: "2Gi"
+
+env:
+  # Microsoft Foundry project endpoint (injected by Foundry at deploy time)
+  - name: AZURE_AI_PROJECT_ENDPOINT
+    secretRef: azure-ai-project-endpoint
+
+  # Model deployment to use (gpt-5.4 recommended for coverage criteria assessment)
+  - name: AZURE_OPENAI_DEPLOYMENT_NAME
+    value: gpt-5.4
+
+  # DeepSense NPI Registry MCP server
+  - name: MCP_NPI_REGISTRY
+    value: https://mcp.deepsense.ai/npi_registry/mcp
+
+  # DeepSense CMS Coverage MCP server
+  - name: MCP_CMS_COVERAGE
+    value: https://mcp.deepsense.ai/cms_coverage/mcp
+
+  # Azure Application Insights (optional)
+  - name: APPLICATION_INSIGHTS_CONNECTION_STRING
+    secretRef: app-insights-connection-string

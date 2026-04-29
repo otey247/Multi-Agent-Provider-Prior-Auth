@@ -1,0 +1,32 @@
+# Foundry Hosted Agent descriptor — Compliance Validation Agent
+# Deploy with: az ai agent deploy --file agent.yaml
+#
+# No MCP connections — compliance validation is pure reasoning.
+# No Foundry Tool MCP registration required.
+
+name: compliance-agent
+description: >
+  Validates documentation completeness for prior authorization requests
+  using a 10-item checklist covering patient information, provider NPI,
+  insurance details, medical codes, clinical notes quality, NCCI bundling
+  risk, and service type classification.
+  Uses no external tools — pure LLM reasoning.
+runtime: agent-framework
+version: "1.0.0"
+
+resources:
+  cpu: "0.5"
+  memory: "1Gi"
+
+env:
+  # Microsoft Foundry project endpoint (injected by Foundry at deploy time)
+  - name: AZURE_AI_PROJECT_ENDPOINT
+    secretRef: azure-ai-project-endpoint
+
+  # Model deployment to use (gpt-5.4 recommended for accurate checklist validation)
+  - name: AZURE_OPENAI_DEPLOYMENT_NAME
+    value: gpt-5.4
+
+  # Azure Application Insights (optional)
+  - name: APPLICATION_INSIGHTS_CONNECTION_STRING
+    secretRef: app-insights-connection-string
