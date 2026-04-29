@@ -160,7 +160,7 @@ export interface SynthesisAuditTrail {
 
 export interface ReviewResponse {
   request_id: string;
-  recommendation: "approve" | "pend_for_review";
+  recommendation: "ready_to_submit" | "needs_review" | "approve" | "pend_for_review";
   confidence: number;
   confidence_level: string; // "HIGH" | "MEDIUM" | "LOW"
   summary: string;
@@ -172,7 +172,7 @@ export interface ReviewResponse {
   documentation_gaps: DocumentationGap[];
   policy_references: string[];
   decision_gate?: string;   // "gate_1_provider" | "gate_2_codes" | "gate_3_necessity" | "approved"
-  criteria_summary?: string; // e.g. "8 of 8 criteria MET"
+  criteria_summary?: string; // e.g. "8 of 8 requirements MET"
   synthesis_audit_trail?: SynthesisAuditTrail;
   disclaimer: string;
   agent_results?: AgentResults;
@@ -224,8 +224,8 @@ export interface ReviewProgress {
 
 export interface DecisionRequest {
   request_id: string;
-  action: "accept" | "override";
-  override_recommendation?: "approve" | "pend_for_review";
+  action: "submit" | "revise" | "accept" | "override";
+  override_recommendation?: "ready_to_submit" | "needs_review" | "approve" | "pend_for_review";
   override_rationale?: string;
   reviewer_name: string;
   reviewer_id?: string;
@@ -233,7 +233,7 @@ export interface DecisionRequest {
 
 export interface NotificationLetter {
   authorization_number: string;
-  letter_type: "approval" | "pend";
+  letter_type: "submission_ready" | "needs_documentation" | "approval" | "pend";
   effective_date: string;
   expiration_date?: string;
   patient_name: string;
@@ -247,7 +247,7 @@ export interface NotificationLetter {
 export interface DecisionResponse {
   request_id: string;
   authorization_number: string;
-  final_recommendation: "approve" | "pend_for_review";
+  final_recommendation: "ready_to_submit" | "needs_review" | "approve" | "pend_for_review";
   decided_by: string;
   decided_at: string;
   was_overridden: boolean;

@@ -1,4 +1,4 @@
-"""Decision and notification endpoint for prior authorization review."""
+"""Decision and notification endpoint for provider prior authorization preparation."""
 
 import logging
 from datetime import datetime, timezone
@@ -9,8 +9,8 @@ from app.models.schemas import DecisionRequest, DecisionResponse, NotificationLe
 from app.agents.orchestrator import get_review, store_decision
 from app.services.notification import (
     generate_authorization_number,
-    generate_approval_letter,
-    generate_pend_letter,
+    generate_submission_ready_letter,
+    generate_needs_documentation_letter,
     generate_letter_pdf,
 )
 from app.services.audit_pdf import regenerate_audit_pdf_with_override
@@ -22,11 +22,11 @@ router = APIRouter()
 
 @router.post("/decision", response_model=DecisionResponse)
 async def submit_decision(request: DecisionRequest):
-    """Accept or override the AI recommendation and generate a notification letter.
+    """Accept or revise the AI submission readiness assessment and generate a letter.
 
-    Requires that the review has already been completed (request_id must exist
-    in the review store). Generates a notification letter (approval or pend)
-    and persists the decision record.
+    Requires that the prior auth preparation has already been completed
+    (request_id must exist in the review store). Generates a provider letter
+    (submission ready or documentation needed) and persists the decision record.
     """
     stored = get_review(request.request_id)
     if not stored:
@@ -45,24 +45,35 @@ async def submit_decision(request: DecisionRequest):
     request_data = stored["request_data"]
 
     # Determine final recommendation
-    if request.action == "accept":
+    if request.action in ("accept", "submit"):
         final_recommendation = review_response["recommendation"]
-    elif request.action == "override":
+    elif request.action in ("override", "revise"):
         if not request.override_recommendation:
             raise HTTPException(
                 status_code=422,
-                detail="override_recommendation required when action is 'override'",
+                detail="override_recommendation required when action is 'override' or 'revise'",
             )
-        if request.override_recommendation not in ("approve", "pend_for_review"):
+        # Accept both old and new recommendation values
+        valid_recommendations = (
+            "ready_to_submit", "needs_review",
+            "approve", "pend_for_review",  # legacy values
+        )
+        if request.override_recommendation not in valid_recommendations:
             raise HTTPException(
                 status_code=422,
-                detail="override_recommendation must be 'approve' or 'pend_for_review'",
+                detail="override_recommendation must be 'ready_to_submit' or 'needs_review'",
             )
-        final_recommendation = request.override_recommendation
+        # Normalize legacy values
+        rec = request.override_recommendation
+        if rec == "approve":
+            rec = "ready_to_submit"
+        elif rec == "pend_for_review":
+            rec = "needs_review"
+        final_recommendation = rec
     else:
         raise HTTPException(
             status_code=422,
-            detail="action must be 'accept' or 'override'",
+            detail="action must be 'submit' or 'revise'",
         )
 
     # Generate authorization number
@@ -84,7 +95,7 @@ async def submit_decision(request: DecisionRequest):
     ]
 
     # Override information for letters
-    is_overridden = request.action == "override"
+    is_overridden = request.action in ("override", "revise")
     original_recommendation = review_response["recommendation"]
     override_kwargs = {
         "was_overridden": is_overridden,
@@ -114,10 +125,10 @@ async def submit_decision(request: DecisionRequest):
 
     # Generate notification letter
     try:
-        if final_recommendation == "approve":
-            letter_dict = generate_approval_letter(**common_kwargs)
+        if final_recommendation in ("ready_to_submit", "approve"):
+            letter_dict = generate_submission_ready_letter(**common_kwargs)
         else:
-            letter_dict = generate_pend_letter(
+            letter_dict = generate_needs_documentation_letter(
                 **common_kwargs,
                 missing_documentation=review_response.get("missing_documentation", []),
                 coverage_criteria_not_met=review_response.get("coverage_criteria_not_met", []),
@@ -141,7 +152,7 @@ async def submit_decision(request: DecisionRequest):
     letter_dict["coverage_criteria_met"] = review_response.get("coverage_criteria_met", [])
     letter_dict["coverage_criteria_not_met"] = review_response.get("coverage_criteria_not_met", [])
     letter_dict["documentation_gaps"] = documentation_gaps
-    if final_recommendation != "approve":
+    if final_recommendation not in ("ready_to_submit", "approve"):
         letter_dict["missing_documentation"] = review_response.get("missing_documentation", [])
 
     # Include override info in letter_dict for PDF rendering
@@ -195,7 +206,7 @@ async def submit_decision(request: DecisionRequest):
         "final_recommendation": final_recommendation,
         "decided_by": request.reviewer_name,
         "decided_at": decided_at,
-        "was_overridden": request.action == "override",
+        "was_overridden": is_overridden,
         "override_rationale": request.override_rationale,
         "letter": letter_dict,
     }
@@ -217,7 +228,7 @@ async def submit_decision(request: DecisionRequest):
         final_recommendation=final_recommendation,
         decided_by=request.reviewer_name,
         decided_at=decided_at,
-        was_overridden=request.action == "override",
+        was_overridden=is_overridden,
         override_rationale=request.override_rationale if is_overridden else None,
         original_recommendation=original_recommendation if is_overridden else None,
         letter=NotificationLetter(**letter_for_model),

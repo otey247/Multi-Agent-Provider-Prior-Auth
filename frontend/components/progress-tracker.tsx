@@ -33,23 +33,23 @@ const PHASE_CONFIG: Record<
 > = {
   preflight: {
     label: "Pre-flight Validation",
-    description: "Validating procedure code formats",
+    description: "Validating procedure code formats and request completeness",
   },
   phase_1: {
     label: "Phase 1: Parallel Analysis",
-    description: "Compliance + Clinical Reviewer agents",
+    description: "Documentation Completeness + Clinical Evidence Retrieval agents",
   },
   phase_2: {
-    label: "Phase 2: Coverage Review",
-    description: "Provider verification + coverage criteria",
+    label: "Phase 2: Policy Matching",
+    description: "Provider credential check + payer policy requirements matching",
   },
   phase_3: {
-    label: "Phase 3: Decision Synthesis",
-    description: "Applying gate-based decision rubric",
+    label: "Phase 3: Submission Readiness Assessment",
+    description: "Applying gate-based submission readiness evaluation",
   },
   phase_4: {
-    label: "Phase 4: Audit Trail",
-    description: "Building audit trail and justification",
+    label: "Phase 4: Readiness Report",
+    description: "Building submission readiness report and audit trail",
   },
 };
 
@@ -65,10 +65,10 @@ const AGENT_CONFIG: Record<
   AgentId,
   { label: string; icon: typeof ShieldCheck }
 > = {
-  compliance: { label: "Compliance Agent", icon: ClipboardList },
-  clinical: { label: "Clinical Reviewer", icon: Stethoscope },
-  coverage: { label: "Coverage Agent", icon: FileSearch },
-  synthesis: { label: "Synthesis Engine", icon: Brain },
+  compliance: { label: "Documentation Completeness Agent", icon: ClipboardList },
+  clinical: { label: "Clinical Evidence Retrieval Agent", icon: Stethoscope },
+  coverage: { label: "Policy Matching Agent", icon: FileSearch },
+  synthesis: { label: "Submission Readiness Agent", icon: Brain },
 };
 
 function PhaseIcon({
@@ -132,7 +132,7 @@ export function ProgressTracker({ progress }: ProgressTrackerProps) {
             <div className="flex items-center gap-2">
               <ShieldCheck className="h-5 w-5 text-brand" />
               <span className="font-semibold text-sm">
-                Multi-Agent Review in Progress
+                Prior Auth Assessment in Progress
               </span>
             </div>
             <div className="flex items-center gap-3">

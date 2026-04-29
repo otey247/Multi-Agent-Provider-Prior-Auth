@@ -39,7 +39,7 @@ class _AuditPDF(FPDF):
         self.set_text_color(*_GRAY_TEXT)
         self.cell(
             0, 6,
-            "PRIOR AUTHORIZATION REVIEW -- AUDIT JUSTIFICATION",
+            "PROVIDER PRIOR AUTHORIZATION -- SUBMISSION READINESS REPORT",
             align="C",
         )
         self.ln(4)
@@ -52,7 +52,7 @@ class _AuditPDF(FPDF):
         self.set_y(-20)
         self.set_font("Helvetica", "I", 7)
         self.set_text_color(*_LIGHT_GRAY_TEXT)
-        self.cell(0, 4, "AI-ASSISTED DRAFT -- REVIEW REQUIRED", align="C")
+        self.cell(0, 4, "AI-ASSISTED DRAFT -- HUMAN REVIEW REQUIRED BEFORE SUBMISSION", align="C")
         self.ln(3)
         self.cell(
             0, 4,
@@ -98,15 +98,15 @@ def _bullet(pdf: FPDF, text: str) -> None:
 
 
 def _decision_badge(pdf: FPDF, recommendation: str) -> None:
-    """Render a colored decision badge."""
-    is_approve = recommendation.lower() in ("approve", "approved")
-    fill = _GREEN_FILL if is_approve else _AMBER_FILL
-    text = "APPROVE" if is_approve else "PEND FOR REVIEW"
+    """Render a colored submission status badge."""
+    is_ready = recommendation.lower() in ("ready_to_submit", "approve", "approved")
+    fill = _GREEN_FILL if is_ready else _AMBER_FILL
+    text = "READY TO SUBMIT" if is_ready else "NEEDS REVIEW"
 
     pdf.set_fill_color(*fill)
     pdf.set_font("Helvetica", "B", 12)
     pdf.set_text_color(*_BLACK)
-    pdf.cell(0, 10, f"Decision: {text}", align="C", fill=True)
+    pdf.cell(0, 10, f"Submission Status: {text}", align="C", fill=True)
     pdf.ln(8)
 
 
@@ -228,7 +228,7 @@ def _render_section_1_executive_summary(
     """Section 1: Executive Summary."""
     _section_heading(pdf, 1, "Executive Summary")
     _decision_badge(pdf, recommendation)
-    _kv(pdf, "Review Date", now)
+    _kv(pdf, "Assessment Date", now)
     _kv(pdf, "Patient", f"{request_data.get('patient_name', 'N/A')} (DOB: {request_data.get('patient_dob', 'N/A')})")
     _kv(pdf, "Provider NPI", request_data.get("provider_npi", "N/A"))
     _kv(pdf, "Insurance ID", request_data.get("insurance_id") or "Not provided")
@@ -252,9 +252,9 @@ def _render_section_2_medical_necessity(
     coverage_result: dict,
     clinical_result: dict,
 ) -> None:
-    """Section 2: Medical Necessity Assessment."""
+    """Section 2: Clinical Evidence Assessment."""
     _check_page_space(pdf, 40)
-    _section_heading(pdf, 2, "Medical Necessity Assessment")
+    _section_heading(pdf, 2, "Clinical Evidence Assessment")
 
     # Provider info — normalize the data before rendering
     pv = coverage_result.get("provider_verification", {})
@@ -289,27 +289,27 @@ def _render_section_2_medical_necessity(
             pv_status = "INACTIVE"
 
         if provider_name:
-            _kv(pdf, "Provider", f"{provider_name} -- {specialty}")
+            _kv(pdf, "Ordering Provider", f"{provider_name} -- {specialty}")
         else:
-            _kv(pdf, "Provider", f"NPI {pv.get('npi', 'N/A')} -- {specialty}")
+            _kv(pdf, "Ordering Provider", f"NPI {pv.get('npi', 'N/A')} -- {specialty}")
         _kv(pdf, "Provider Status", pv_status)
 
-    # Coverage policies
+    # Payer policies matched
     policies = coverage_result.get("coverage_policies", [])
     if policies:
         pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(0, 6, "Coverage Policies Applied:")
+        pdf.cell(0, 6, "Payer Policies Matched:")
         pdf.ln(5)
         for p in policies:
             if isinstance(p, dict):
                 _bullet(pdf, f"{p.get('policy_id', '?')}: {p.get('title', 'N/A')} ({p.get('type', '?')})")
 
-    # Clinical evidence
+    # Clinical evidence retrieved
     extraction = clinical_result.get("clinical_extraction", {})
     if isinstance(extraction, dict) and extraction:
         pdf.ln(3)
         pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(0, 6, "Clinical Evidence Summary:")
+        pdf.cell(0, 6, "Retrieved Clinical Evidence:")
         pdf.ln(5)
         if extraction.get("chief_complaint"):
             _bullet(pdf, f"Chief Complaint: {extraction['chief_complaint']}")
@@ -464,7 +464,7 @@ def _render_section_3_criterion_evaluation(
             )
     else:
         pdf.set_font("Helvetica", "I", 9)
-        pdf.cell(0, 6, "No coverage criteria were identified for evaluation.")
+        pdf.cell(0, 6, "No payer policy requirements were identified for evaluation.")
         pdf.ln(5)
 
     pdf.ln(4)
@@ -486,7 +486,7 @@ def _render_section_4_validation_checks(
         if pv_status_display in ("A", "ACTIVE"):
             pv_status_display = "VERIFIED"
         pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(0, 6, f"Provider Verification: NPI {pv.get('npi', 'N/A')} - {pv_status_display}")
+        pdf.cell(0, 6, f"Provider Credentials: NPI {pv.get('npi', 'N/A')} - {pv_status_display}")
         pdf.ln(6)
 
     dx_val = clinical_result.get("diagnosis_validation", [])
@@ -522,7 +522,7 @@ def _render_section_4_validation_checks(
     if checklist:
         _check_page_space(pdf, 30)
         pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(0, 6, "Compliance Checklist:")
+        pdf.cell(0, 6, "Documentation Completeness Checklist:")
         pdf.ln(6)
 
         cl_cols = [("Item", 50), ("Status", 25), ("Detail", 100)]
@@ -553,11 +553,18 @@ def _render_section_5_decision_rationale(
     confidence: float,
     confidence_level: str,
 ) -> None:
-    """Section 5: Decision Rationale."""
+    """Section 5: Submission Readiness Rationale."""
     _check_page_space(pdf, 40)
-    _section_heading(pdf, 5, "Decision Rationale")
+    _section_heading(pdf, 5, "Submission Readiness Rationale")
 
-    _kv(pdf, "Decision", recommendation.upper(), bold_value=True)
+    # Normalize display value
+    rec_display = recommendation.upper().replace("_", " ")
+    if recommendation in ("approve", "ready_to_submit"):
+        rec_display = "READY TO SUBMIT"
+    elif recommendation in ("pend_for_review", "needs_review"):
+        rec_display = "NEEDS REVIEW"
+
+    _kv(pdf, "Submission Status", rec_display, bold_value=True)
     _kv(pdf, "Confidence", f"{confidence_level} ({int(confidence * 100)}%)")
 
     gate_raw = synthesis.get("decision_gate", "N/A")
@@ -566,7 +573,7 @@ def _render_section_5_decision_rationale(
         pdf.ln(2)
         pdf.set_font("Helvetica", "B", 9)
         pdf.set_x(10)
-        pdf.cell(0, 6, "Decision Gates:")
+        pdf.cell(0, 6, "Readiness Gates:")
         pdf.ln(5)
         for gp in gate_parts:
             is_pass = "PASS" in gp.upper()
@@ -590,7 +597,7 @@ def _render_section_5_decision_rationale(
                     break
             pdf.multi_cell(0, 5, _safe_str(gate_text))
     else:
-        _kv(pdf, "Decision Gate", gate_raw)
+        _kv(pdf, "Gate", gate_raw)
 
     pdf.ln(2)
     rationale = synthesis.get("clinical_rationale", "No rationale provided.")
@@ -601,7 +608,7 @@ def _render_section_5_decision_rationale(
     met_criteria = synthesis.get("coverage_criteria_met", [])
     if met_criteria:
         pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(0, 6, "Key Supporting Facts:")
+        pdf.cell(0, 6, "Payer Requirements Met — Key Evidence:")
         pdf.ln(5)
         for m in met_criteria:
             _bullet(pdf, m)
@@ -636,7 +643,7 @@ def _render_section_6_documentation_gaps(
                 if g.get("request"):
                     pdf.set_x(40)
                     pdf.set_font("Helvetica", "I", 8)
-                    pdf.multi_cell(0, 4, _safe_str(f"Action: {g['request']}"))
+                    pdf.multi_cell(0, 4, _safe_str(f"Action Required: {g['request']}"))
                     pdf.set_font("Helvetica", "", 9)
 
         pdf.ln(3)
@@ -653,33 +660,34 @@ def _render_section_7_audit_trail(
     data_sources = audit_trail.get("data_sources", [])
     if data_sources:
         pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(0, 6, "Data Sources:")
+        pdf.cell(0, 6, "Data Sources Consulted:")
         pdf.ln(5)
         for src in data_sources:
             _bullet(pdf, src)
         pdf.ln(3)
 
-    _kv(pdf, "Review Started", audit_trail.get("review_started", "N/A"))
-    _kv(pdf, "Review Completed", audit_trail.get("review_completed", "N/A"))
-    _kv(pdf, "Extraction Confidence", f"{audit_trail.get('extraction_confidence', 0)}%")
-    _kv(pdf, "Assessment Confidence", f"{audit_trail.get('assessment_confidence', 0)}%")
-    _kv(pdf, "Criteria Met", audit_trail.get("criteria_met_count", "0/0"))
+    _kv(pdf, "Assessment Started", audit_trail.get("review_started", "N/A"))
+    _kv(pdf, "Assessment Completed", audit_trail.get("review_completed", "N/A"))
+    _kv(pdf, "Evidence Extraction Confidence", f"{audit_trail.get('extraction_confidence', 0)}%")
+    _kv(pdf, "Policy Matching Confidence", f"{audit_trail.get('assessment_confidence', 0)}%")
+    _kv(pdf, "Requirements Met", audit_trail.get("criteria_met_count", "0/0"))
     pdf.ln(3)
 
 
 def _render_section_8_regulatory_compliance(pdf: FPDF) -> None:
-    """Section 8: Regulatory Compliance."""
+    """Section 8: Compliance Notes."""
     _check_page_space(pdf, 30)
-    _section_heading(pdf, 8, "Regulatory Compliance")
+    _section_heading(pdf, 8, "Compliance Notes")
 
     pdf.set_font("Helvetica", "B", 9)
-    pdf.cell(0, 6, "Decision Policy: LENIENT Mode (default)")
+    pdf.cell(0, 6, "Assessment Policy: Provider Submission Readiness Mode")
     pdf.ln(5)
     pdf.set_font("Helvetica", "", 9)
-    _bullet(pdf, "Provider verification: Required")
-    _bullet(pdf, "Code validation: Required")
-    _bullet(pdf, "Medical necessity criteria: All must be MET for approval")
-    _bullet(pdf, "Unmet/insufficient criteria: Results in PEND (not DENY)")
+    _bullet(pdf, "Provider credential check: Required before submission")
+    _bullet(pdf, "Code validation: Required — coding errors cause avoidable denials")
+    _bullet(pdf, "Payer policy requirements: All must be MET for ready-to-submit status")
+    _bullet(pdf, "Unmet/insufficient requirements: Flagged as needs-review (not a denial)")
+    _bullet(pdf, "Human review required: Before final submission to payer")
     pdf.ln(4)
 
 
@@ -692,10 +700,10 @@ def _render_disclaimer_footer(pdf: FPDF, now: str) -> None:
     pdf.set_text_color(*_AMBER_TEXT)
     pdf.multi_cell(
         0, 4,
-        "DISCLAIMER: This is an AI-assisted draft. Coverage policies reflect "
-        "Medicare LCDs/NCDs only. If this review is for a commercial or Medicare "
-        "Advantage plan, payer-specific policies were not applied. All decisions "
-        "require human clinical review before finalization.",
+        "DISCLAIMER: This is an AI-assisted draft for provider prior authorization preparation. "
+        "Payer policies reflect Medicare LCDs/NCDs only. Commercial and Medicare "
+        "Advantage plans may have different requirements. Human review required "
+        "before submission to payer.",
         fill=True,
     )
     pdf.set_text_color(*_GRAY_TEXT)
@@ -703,7 +711,7 @@ def _render_disclaimer_footer(pdf: FPDF, now: str) -> None:
     pdf.ln(3)
     pdf.cell(
         0, 4,
-        f"Generated: {now} | AI-Assisted Prior Authorization Review System",
+        f"Generated: {now} | AI-Assisted Provider Prior Authorization System",
         align="C",
     )
 
@@ -760,7 +768,12 @@ def generate_audit_justification_pdf(
         Base64-encoded PDF string.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    recommendation = synthesis.get("recommendation", "pend_for_review")
+    recommendation = synthesis.get("recommendation", "needs_review")
+    # Normalize legacy values
+    if recommendation == "approve":
+        recommendation = "ready_to_submit"
+    elif recommendation == "pend_for_review":
+        recommendation = "needs_review"
     confidence = synthesis.get("confidence", 0)
     confidence_level = synthesis.get("confidence_level", "LOW")
 
@@ -775,10 +788,10 @@ def generate_audit_justification_pdf(
     pdf.set_text_color(*_AMBER_TEXT)
     pdf.multi_cell(
         0, 4,
-        "WARNING: AI-ASSISTED DRAFT -- REVIEW REQUIRED. "
-        "All recommendations are drafts requiring human clinical review. "
-        "Coverage policies reflect Medicare LCDs/NCDs only. "
-        "Commercial and Medicare Advantage plans may differ.",
+        "WARNING: AI-ASSISTED DRAFT -- PROVIDER REVIEW REQUIRED. "
+        "This assessment prepares a prior auth submission; it is not a payer coverage determination. "
+        "Payer policies reflect Medicare LCDs/NCDs only. "
+        "Human review required before submission.",
         fill=True,
     )
     pdf.set_text_color(*_BLACK)
@@ -810,9 +823,9 @@ def regenerate_audit_pdf_with_override(
     final_recommendation: str,
     decided_at: str,
 ) -> str:
-    """Regenerate the full audit PDF with all 8 sections plus Section 9: Clinician Override.
+    """Regenerate the full audit PDF with all 8 sections plus Section 9: Staff Override.
 
-    Re-generates the complete audit justification document (Sections 1-8)
+    Re-generates the complete submission readiness document (Sections 1-8)
     and appends a Section 9 with override details, so the PDF is clearly
     an audit document rather than a notification letter.
 
@@ -826,7 +839,12 @@ def regenerate_audit_pdf_with_override(
     audit_trail = original_args.get("audit_trail", {})
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    recommendation = synthesis.get("recommendation", "pend_for_review")
+    recommendation = synthesis.get("recommendation", "needs_review")
+    # Normalize legacy values
+    if recommendation == "approve":
+        recommendation = "ready_to_submit"
+    elif recommendation == "pend_for_review":
+        recommendation = "needs_review"
     confidence = synthesis.get("confidence", 0)
     confidence_level = synthesis.get("confidence_level", "LOW")
 
@@ -841,10 +859,10 @@ def regenerate_audit_pdf_with_override(
     pdf.set_text_color(*_AMBER_TEXT)
     pdf.multi_cell(
         0, 4,
-        "WARNING: AI-ASSISTED DRAFT -- REVIEW REQUIRED. "
-        "All recommendations are drafts requiring human clinical review. "
-        "Coverage policies reflect Medicare LCDs/NCDs only. "
-        "Commercial and Medicare Advantage plans may differ.",
+        "WARNING: AI-ASSISTED DRAFT -- PROVIDER REVIEW REQUIRED. "
+        "This assessment prepares a prior auth submission; it is not a payer coverage determination. "
+        "Payer policies reflect Medicare LCDs/NCDs only. "
+        "Human review required before submission.",
         fill=True,
     )
     pdf.set_text_color(*_BLACK)
@@ -855,11 +873,14 @@ def regenerate_audit_pdf_with_override(
         pdf.set_fill_color(255, 220, 220)
         pdf.set_font("Helvetica", "B", 9)
         pdf.set_text_color(180, 0, 0)
+        # Normalize recommendation display labels
+        orig_display = original_recommendation.replace("approve", "ready_to_submit").replace("pend_for_review", "needs_review").replace("_", " ").upper()
+        final_display = final_recommendation.replace("approve", "ready_to_submit").replace("pend_for_review", "needs_review").replace("_", " ").upper()
         pdf.multi_cell(
             0, 5,
-            f"CLINICIAN OVERRIDE: The original AI recommendation "
-            f"({original_recommendation.replace('_', ' ').upper()}) was overridden to "
-            f"{final_recommendation.replace('_', ' ').upper()} by {override_reviewer} "
+            f"STAFF OVERRIDE: The original AI assessment "
+            f"({orig_display}) was revised to "
+            f"{final_display} by {override_reviewer} "
             f"on {decided_at}.",
             fill=True,
         )
@@ -868,7 +889,7 @@ def regenerate_audit_pdf_with_override(
 
     # --- Render ALL 8 original audit sections ---
     # Section 1 uses the final (overridden) recommendation in its decision badge
-    # so the PDF clearly reflects the clinician's decision.
+    # so the PDF clearly reflects the staff's decision.
     _render_section_1_executive_summary(
         pdf, request_data, synthesis,
         final_recommendation if was_overridden else recommendation,
@@ -882,15 +903,18 @@ def regenerate_audit_pdf_with_override(
     _render_section_7_audit_trail(pdf, audit_trail)
     _render_section_8_regulatory_compliance(pdf)
 
-    # --- Section 9: Clinician Override Record (new section) ---
+    # --- Section 9: Staff Override Record (new section) ---
     _check_page_space(pdf, 60)
-    _section_heading(pdf, 9, "Clinician Override Record")
+    _section_heading(pdf, 9, "Staff Override Record")
 
-    _kv(pdf, "Override Status", "YES -- Decision was overridden", bold_value=True)
-    _kv(pdf, "Overridden By", override_reviewer, bold_value=True)
+    orig_rec_display = original_recommendation.replace("approve", "ready_to_submit").replace("pend_for_review", "needs_review").replace("_", " ").upper()
+    final_rec_display = final_recommendation.replace("approve", "ready_to_submit").replace("pend_for_review", "needs_review").replace("_", " ").upper()
+
+    _kv(pdf, "Override Status", "YES -- Assessment was revised by staff", bold_value=True)
+    _kv(pdf, "Revised By", override_reviewer, bold_value=True)
     _kv(pdf, "Override Date", decided_at)
-    _kv(pdf, "Original AI Recommendation", original_recommendation.replace("_", " ").upper())
-    _kv(pdf, "Final Decision", final_recommendation.replace("_", " ").upper(), bold_value=True)
+    _kv(pdf, "Original AI Assessment", orig_rec_display)
+    _kv(pdf, "Final Staff Decision", final_rec_display, bold_value=True)
     pdf.ln(3)
 
     # Override rationale
@@ -907,9 +931,9 @@ def regenerate_audit_pdf_with_override(
     pdf.set_text_color(*_AMBER_TEXT)
     pdf.multi_cell(
         0, 4,
-        f"AI recommended: {original_recommendation.replace('_', ' ').upper()} "
+        f"AI assessed: {orig_rec_display} "
         f"(Confidence: {confidence_level} {int(confidence * 100)}%) -- "
-        f"Clinician decision: {final_recommendation.replace('_', ' ').upper()}",
+        f"Staff decision: {final_rec_display}",
         fill=True,
     )
     pdf.set_text_color(*_BLACK)

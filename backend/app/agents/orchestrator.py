@@ -1,19 +1,28 @@
-"""Multi-Agent Orchestrator for Prior Authorization Review.
+"""Multi-Agent Orchestrator for Provider Prior Authorization Preparation.
 
 Coordinates three specialized agents in a fan-out/fan-in pattern:
-  Phase 1 (parallel): Compliance Agent + Clinical Reviewer Agent
-  Phase 2 (sequential): Coverage Agent (receives clinical findings)
-  Phase 3: Synthesis — aggregates all agent outputs into a final decision
+  Phase 1 (parallel): Documentation Completeness Agent + Clinical Evidence Retrieval Agent
+  Phase 2 (sequential): Policy Matching Agent (receives clinical findings)
+  Phase 3: Submission Readiness Assessment — aggregates all agent outputs
+  Phase 4: Builds submission readiness report and audit trail
 
-Enhanced with the Anthropic prior-auth-review-skill decision rubric:
-  - LENIENT mode (default): all problematic scenarios -> PEND
-  - Structured evaluation order: provider -> codes -> med necessity
+Provider-side prior auth workflow:
+  - Documentation Completeness: validates that the request package has all required fields
+  - Clinical Evidence Retrieval: extracts and validates clinical evidence from notes
+  - Policy Matching: verifies provider credentials and matches evidence to payer requirements
+  - Submission Readiness Assessment: determines if the package is ready to submit to payer
+
+Gate-based submission readiness evaluation:
+  - Gate 1: Provider credential check
+  - Gate 2: Code and order validation
+  - Gate 3: Payer policy requirements matching
   - Confidence scoring: HIGH/MEDIUM/LOW + 0-100
   - Audit trail with data sources and metrics
-  - Audit justification document generation
+  - Submission readiness report generation
 
-All four specialist agents (compliance, clinical, coverage, synthesis) run
-as independent hosted agent containers. This module is the pure dispatcher.
+All four specialist agents (documentation completeness, clinical evidence retrieval,
+policy matching, submission readiness) run as independent hosted agent containers.
+This module is the pure dispatcher.
 """
 
 import asyncio
@@ -86,9 +95,9 @@ def _validate_agent_result(agent_name: str, result: dict) -> list[str]:
 
 
 _AGENT_DISPLAY_NAMES: dict[str, str] = {
-    "compliance": "Compliance Agent",
-    "clinical": "Clinical Reviewer Agent",
-    "coverage": "Coverage Assessment Agent",
+    "compliance": "Documentation Completeness Agent",
+    "clinical": "Clinical Evidence Retrieval Agent",
+    "coverage": "Policy Matching Agent",
 }
 
 _CHECKLIST_STATUS_MAP: dict[str, str] = {
@@ -391,7 +400,14 @@ def _generate_audit_justification(
     Based on the Anthropic prior-auth-review-skill audit_justification.md template.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    recommendation = str(synthesis.get("recommendation", "pend_for_review")).upper()
+    recommendation_raw = str(synthesis.get("recommendation", "needs_review"))
+    # Normalize legacy values for display
+    if recommendation_raw in ("approve",):
+        recommendation_display = "READY TO SUBMIT"
+    elif recommendation_raw in ("pend_for_review",):
+        recommendation_display = "NEEDS REVIEW"
+    else:
+        recommendation_display = recommendation_raw.upper().replace("_", " ")
     confidence = synthesis.get("confidence", 0)
     try:
         confidence = float(confidence)
@@ -402,42 +418,42 @@ def _generate_audit_justification(
     lines = []
 
     # --- Disclaimer Header ---
-    lines.append("# Prior Authorization Review — Audit Justification")
+    lines.append("# Provider Prior Authorization — Submission Readiness Report")
     lines.append("")
     lines.append("> **WARNING: AI-ASSISTED DRAFT — REVIEW REQUIRED**")
-    lines.append("> All recommendations are drafts requiring human clinical review.")
-    lines.append("> Coverage policies reflect Medicare LCDs/NCDs only.")
-    lines.append("> Commercial and Medicare Advantage plans may differ.")
+    lines.append("> All assessments are drafts requiring human clinical review before submission.")
+    lines.append("> Payer policy matching reflects Medicare LCDs/NCDs only.")
+    lines.append("> Commercial and Medicare Advantage plans may have different requirements.")
     lines.append("")
 
     # --- Section 1: Executive Summary ---
     lines.append("## 1. Executive Summary")
     lines.append("")
-    lines.append(f"- **Review Date:** {now}")
+    lines.append(f"- **Assessment Date:** {now}")
     lines.append(f"- **Patient:** {request_data.get('patient_name', 'N/A')} (DOB: {request_data.get('patient_dob', 'N/A')})")
     lines.append(f"- **Provider NPI:** {request_data.get('provider_npi', 'N/A')}")
     lines.append(f"- **Insurance ID:** {request_data.get('insurance_id') or 'Not provided'}")
     lines.append(f"- **Diagnosis Codes:** {', '.join(request_data.get('diagnosis_codes', []))}")
     lines.append(f"- **Procedure Codes:** {', '.join(request_data.get('procedure_codes', []))}")
-    lines.append(f"- **Decision:** {recommendation}")
+    lines.append(f"- **Submission Status:** {recommendation_display}")
     lines.append(f"- **Confidence:** {confidence_level} ({int(confidence * 100)}%)")
     lines.append("")
     lines.append(f"**Summary:** {synthesis.get('summary', 'N/A')}")
     lines.append("")
 
-    # --- Section 2: Medical Necessity Assessment ---
-    lines.append("## 2. Medical Necessity Assessment")
+    # --- Section 2: Clinical Evidence Assessment ---
+    lines.append("## 2. Clinical Evidence Assessment")
     lines.append("")
 
-    # Coverage policy
+    # Provider verification
     pv = coverage_result.get("provider_verification", {})
     if pv and isinstance(pv, dict):
-        lines.append(f"**Provider:** {pv.get('name', 'N/A')} — {pv.get('specialty', 'N/A')} — Status: {pv.get('status', 'N/A')}")
+        lines.append(f"**Ordering Provider:** {pv.get('name', 'N/A')} — {pv.get('specialty', 'N/A')} — Status: {pv.get('status', 'N/A')}")
         lines.append("")
 
     policies = coverage_result.get("coverage_policies", [])
     if policies:
-        lines.append("**Coverage Policies Applied:**")
+        lines.append("**Payer Policies Matched:**")
         for p in policies:
             if isinstance(p, dict):
                 lines.append(f"- {p.get('policy_id', '?')}: {p.get('title', 'N/A')} ({p.get('type', '?')})")
@@ -446,7 +462,7 @@ def _generate_audit_justification(
     # Clinical evidence summary
     extraction = clinical_result.get("clinical_extraction", {})
     if isinstance(extraction, dict):
-        lines.append("**Clinical Evidence Summary:**")
+        lines.append("**Retrieved Clinical Evidence:**")
         if extraction.get("chief_complaint"):
             lines.append(f"- Chief Complaint: {extraction['chief_complaint']}")
         if extraction.get("prior_treatments"):
@@ -462,7 +478,7 @@ def _generate_audit_justification(
 
     criteria = coverage_result.get("criteria_assessment", [])
     if criteria:
-        lines.append(f"**Criteria Met:** {audit_trail.get('criteria_met_count', '0/0')}")
+        lines.append(f"**Payer Requirements Met:** {audit_trail.get('criteria_met_count', '0/0')}")
         lines.append("")
         for c in criteria:
             if not isinstance(c, dict):
@@ -483,7 +499,7 @@ def _generate_audit_justification(
                 lines.append(f"- **Notes:** {c['notes']}")
             lines.append("")
     else:
-        lines.append("No coverage criteria were identified for evaluation.")
+        lines.append("No payer policy requirements were identified for evaluation.")
         lines.append("")
 
     # --- Section 4: Validation Checks ---
@@ -492,7 +508,7 @@ def _generate_audit_justification(
 
     # Provider verification
     if pv and isinstance(pv, dict):
-        lines.append(f"**Provider Verification:** NPI {pv.get('npi', 'N/A')} — {pv.get('status', 'N/A')}")
+        lines.append(f"**Provider Credentials:** NPI {pv.get('npi', 'N/A')} — {pv.get('status', 'N/A')}")
         if pv.get("detail"):
             lines.append(f"  Detail: {pv['detail']}")
         lines.append("")
@@ -516,7 +532,7 @@ def _generate_audit_justification(
     # Compliance checklist
     checklist = compliance_result.get("checklist", [])
     if checklist:
-        lines.append("**Compliance Checklist:**")
+        lines.append("**Documentation Completeness Checklist:**")
         lines.append("")
         lines.append("| Item | Status | Detail |")
         lines.append("|------|--------|--------|")
@@ -525,16 +541,16 @@ def _generate_audit_justification(
                 lines.append(f"| {item.get('item', '?')} | {item.get('status', '?')} | {item.get('detail', '')[:60]} |")
         lines.append("")
 
-    # --- Section 5: Decision Rationale ---
-    lines.append("## 5. Decision Rationale")
+    # --- Section 5: Submission Readiness Rationale ---
+    lines.append("## 5. Submission Readiness Rationale")
     lines.append("")
-    lines.append(f"**Decision:** {recommendation}")
+    lines.append(f"**Status:** {recommendation_display}")
     # Render decision gates — field may contain pipe-separated gates
     gate_raw = synthesis.get("decision_gate", "N/A")
     gate_parts = [g.strip() for g in str(gate_raw).split("|") if g.strip()]
     if len(gate_parts) > 1:
         lines.append("")
-        lines.append("**Decision Gates:**")
+        lines.append("**Readiness Gates:**")
         for gp in gate_parts:
             # Extract gate label (e.g. "GATE 1 (Provider)") and result
             if ": PASS" in gp.upper():
@@ -553,7 +569,7 @@ def _generate_audit_justification(
     # Supporting facts
     met_criteria = synthesis.get("coverage_criteria_met", [])
     if met_criteria:
-        lines.append("**Key Supporting Facts:**")
+        lines.append("**Requirements Met — Key Evidence:**")
         for m in met_criteria:
             lines.append(f"- {str(m)}")
         lines.append("")
@@ -568,7 +584,7 @@ def _generate_audit_justification(
                 critical = "CRITICAL" if g.get("critical") else "Non-critical"
                 lines.append(f"- [{critical}] {g.get('what', g.get('description', 'N/A'))}")
                 if g.get("request"):
-                    lines.append(f"  Request: {g['request']}")
+                    lines.append(f"  Action Required: {g['request']}")
             else:
                 lines.append(f"- {str(g)}")
         lines.append("")
@@ -576,30 +592,31 @@ def _generate_audit_justification(
     # --- Section 7: Audit Trail ---
     lines.append("## 7. Audit Trail")
     lines.append("")
-    lines.append("**Data Sources:**")
+    lines.append("**Data Sources Consulted:**")
     for src in audit_trail.get("data_sources", []):
         lines.append(f"- {src}")
     lines.append("")
-    lines.append(f"- Review Started: {audit_trail.get('review_started', 'N/A')}")
-    lines.append(f"- Review Completed: {audit_trail.get('review_completed', 'N/A')}")
-    lines.append(f"- Extraction Confidence: {audit_trail.get('extraction_confidence', 0)}%")
-    lines.append(f"- Assessment Confidence: {audit_trail.get('assessment_confidence', 0)}%")
-    lines.append(f"- Criteria Met: {audit_trail.get('criteria_met_count', '0/0')}")
+    lines.append(f"- Assessment Started: {audit_trail.get('review_started', 'N/A')}")
+    lines.append(f"- Assessment Completed: {audit_trail.get('review_completed', 'N/A')}")
+    lines.append(f"- Evidence Extraction Confidence: {audit_trail.get('extraction_confidence', 0)}%")
+    lines.append(f"- Policy Matching Confidence: {audit_trail.get('assessment_confidence', 0)}%")
+    lines.append(f"- Requirements Met: {audit_trail.get('criteria_met_count', '0/0')}")
     lines.append("")
 
-    # --- Section 8: Regulatory Compliance ---
-    lines.append("## 8. Regulatory Compliance")
+    # --- Section 8: Compliance Notes ---
+    lines.append("## 8. Compliance Notes")
     lines.append("")
-    lines.append("**Decision Policy:** LENIENT Mode (default)")
-    lines.append("- Provider verification: Required")
-    lines.append("- Code validation: Required")
-    lines.append("- Medical necessity criteria: All must be MET for approval")
-    lines.append("- Unmet/insufficient criteria: Results in PEND (not DENY)")
+    lines.append("**Assessment Policy:** Provider Submission Readiness Mode")
+    lines.append("- Provider credential check: Required before submission")
+    lines.append("- Code validation: Required — coding errors cause avoidable denials")
+    lines.append("- Payer policy requirements: All must be MET for ready-to-submit status")
+    lines.append("- Unmet/insufficient requirements: Flagged as needs-review (not a denial)")
+    lines.append("- Human review required: Before final submission to payer")
     lines.append("")
 
     # Footer
     lines.append("---")
-    lines.append(f"*Generated: {now} | AI-Assisted Prior Authorization Review System*")
+    lines.append(f"*Generated: {now} | AI-Assisted Provider Prior Authorization System*")
 
     return "\n".join(lines)
 
@@ -608,11 +625,11 @@ async def run_multi_agent_review(
     request_data: dict,
     on_progress: Callable[[dict], Awaitable[None]] | None = None,
 ) -> dict:
-    """Run the multi-agent prior auth review pipeline.
+    """Run the multi-agent prior auth preparation pipeline.
 
-    Phase 1 (parallel): Compliance + Clinical Reviewer
-    Phase 2 (sequential): Coverage Agent (receives clinical findings)
-    Phase 3: Synthesis agent reads all reports, produces final decision
+    Phase 1 (parallel): Documentation Completeness + Clinical Evidence Retrieval
+    Phase 2 (sequential): Policy Matching Agent (receives clinical findings)
+    Phase 3: Submission Readiness Agent reads all reports, produces submission assessment
     Phase 4: Audit trail assembly and justification document generation
 
     Args:
@@ -628,7 +645,7 @@ async def run_multi_agent_review(
     """
     request_id = request_data.get("request_id", "unknown")
 
-    with tracer.start_as_current_span("prior_auth_review") as root_span:
+    with tracer.start_as_current_span("prior_auth_preparation") as root_span:
         root_span.set_attribute("request_id", request_id)
         return await _run_review_pipeline(request_data, on_progress, root_span)
 
@@ -659,8 +676,8 @@ async def _run_review_pipeline(
         "agents": {},
     })
 
-    # --- Phase 1: Parallel — Compliance + Clinical Reviewer ---
-    logger.info("Phase 1: Running Compliance and Clinical agents in parallel")
+    # --- Phase 1: Parallel — Documentation Completeness + Clinical Evidence Retrieval ---
+    logger.info("Phase 1: Running Documentation Completeness and Clinical Evidence agents in parallel")
 
     # Inject CPT pre-flight results into request data so the clinical agent
     # can reference them in procedure_validation (source: "orchestrator_preflight")
@@ -668,10 +685,10 @@ async def _run_review_pipeline(
 
     await _emit({
         "phase": "phase_1", "status": "running", "progress_pct": 10,
-        "message": "Running Compliance and Clinical agents in parallel",
+        "message": "Running Documentation Completeness and Clinical Evidence agents in parallel",
         "agents": {
-            "compliance": {"status": "running", "detail": "Checking documentation completeness"},
-            "clinical": {"status": "running", "detail": "Validating codes and extracting clinical evidence"},
+            "compliance": {"status": "running", "detail": "Checking documentation completeness for submission"},
+            "clinical": {"status": "running", "detail": "Validating codes and retrieving clinical evidence"},
         },
     })
 
@@ -710,23 +727,23 @@ async def _run_review_pipeline(
         "agents": {
             "compliance": _agent_status(
                 "Compliance Agent", compliance_result,
-                "Documentation review complete",
+                "Documentation completeness check complete",
             ),
             "clinical": _agent_status(
                 "Clinical Reviewer Agent", clinical_result,
-                "Clinical analysis complete",
+                "Clinical evidence retrieval complete",
             ),
         },
     })
 
-    # --- Phase 2: Sequential — Coverage Agent (needs clinical findings) ---
-    logger.info("Phase 2: Running Coverage Agent with clinical findings")
+    # --- Phase 2: Sequential — Policy Matching Agent (needs clinical findings) ---
+    logger.info("Phase 2: Running Policy Matching Agent with clinical findings")
 
     await _emit({
         "phase": "phase_2", "status": "running", "progress_pct": 45,
-        "message": "Running Coverage Agent with clinical findings",
+        "message": "Running Policy Matching Agent with clinical findings",
         "agents": {
-            "coverage": {"status": "running", "detail": "Verifying provider and assessing coverage criteria"},
+            "coverage": {"status": "running", "detail": "Verifying provider credentials and matching payer policy requirements"},
         },
     })
 
@@ -743,23 +760,23 @@ async def _run_review_pipeline(
 
     await _emit({
         "phase": "phase_2", "status": "completed", "progress_pct": 70,
-        "message": "Coverage Agent completed",
+        "message": "Policy Matching Agent completed",
         "agents": {
             "coverage": _agent_status(
                 "Coverage Agent", coverage_result,
-                "Coverage analysis complete",
+                "Payer policy matching complete",
             ),
         },
     })
 
-    # --- Phase 3: Synthesis ---
-    logger.info("Phase 3: Synthesizing final recommendation")
+    # --- Phase 3: Submission Readiness Assessment ---
+    logger.info("Phase 3: Assessing submission readiness")
 
     await _emit({
         "phase": "phase_3", "status": "running", "progress_pct": 75,
-        "message": "Synthesizing final recommendation",
+        "message": "Assessing prior auth submission readiness",
         "agents": {
-            "synthesis": {"status": "running", "detail": "Applying decision rubric gates"},
+            "synthesis": {"status": "running", "detail": "Applying submission readiness gates"},
         },
     })
 
@@ -798,9 +815,9 @@ async def _run_review_pipeline(
 
     await _emit({
         "phase": "phase_3", "status": "completed", "progress_pct": 90,
-        "message": "Synthesis complete",
+        "message": "Submission readiness assessment complete",
         "agents": {
-            "synthesis": {"status": "done", "detail": "Decision rubric applied"},
+            "synthesis": {"status": "done", "detail": "Submission readiness gates applied"},
         },
     })
 
@@ -921,9 +938,17 @@ async def _run_review_pipeline(
 
     await _emit({
         "phase": "phase_4", "status": "completed", "progress_pct": 100,
-        "message": "Review complete",
+        "message": "Prior auth preparation complete",
         "agents": {},
     })
+
+    # Normalize legacy recommendation values from synthesis agent
+    recommendation = synthesis.get("recommendation", "needs_review")
+    if recommendation == "approve":
+        recommendation = "ready_to_submit"
+    elif recommendation == "pend_for_review":
+        recommendation = "needs_review"
+    synthesis["recommendation"] = recommendation
 
     return {
         **synthesis,

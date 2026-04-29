@@ -150,13 +150,13 @@ class AgentResults(BaseModel):
 
 
 class SynthesisOutput(BaseModel):
-    """Output schema for the Synthesis Decision Agent.
+    """Output schema for the Submission Readiness Agent.
 
     Used as structured output format to enforce consistent JSON from the
     synthesis agent. Fields match the keys consumed by the orchestrator
     in run_multi_agent_review().
     """
-    recommendation: str = "pend_for_review"  # "approve" or "pend_for_review"
+    recommendation: str = "needs_review"  # "ready_to_submit" or "needs_review"
     confidence: float = 0.0
     confidence_level: str = ""  # "HIGH", "MEDIUM", "LOW"
     summary: str = ""
@@ -182,7 +182,7 @@ class AuditTrail(BaseModel):
 
 class ReviewResponse(BaseModel):
     request_id: str
-    recommendation: str  # "approve", "pend_for_review"
+    recommendation: str  # "ready_to_submit", "needs_review"
     confidence: float = 0.0
     confidence_level: str = ""  # "HIGH", "MEDIUM", "LOW"
     summary: str
@@ -196,7 +196,7 @@ class ReviewResponse(BaseModel):
     decision_gate: str = ""  # "gate_1_provider", "gate_2_codes", "gate_3_necessity", "approved"
     criteria_summary: str = ""  # e.g. "8 of 8 criteria MET"
     synthesis_audit_trail: dict = {}  # gate_results + confidence_components from synthesis agent
-    disclaimer: str = "AI-assisted draft. Medicare LCDs/NCDs applied. Human review required."
+    disclaimer: str = "AI-assisted draft. Payer policies applied for Medicare LCDs/NCDs. Human review required before submission."
     agent_results: AgentResults | None = None
     audit_trail: AuditTrail | None = None
     audit_justification: str | None = None
@@ -209,8 +209,8 @@ class ReviewResponse(BaseModel):
 class DecisionRequest(BaseModel):
     """POST /api/decision request body."""
     request_id: str
-    action: str  # "accept" or "override"
-    override_recommendation: str | None = None  # "approve" or "pend_for_review"
+    action: str  # "submit" or "revise"
+    override_recommendation: str | None = None  # "ready_to_submit" or "needs_review"
     override_rationale: str | None = None
     reviewer_name: str
     reviewer_id: str | None = None
@@ -219,7 +219,7 @@ class DecisionRequest(BaseModel):
 class NotificationLetter(BaseModel):
     """Generated notification letter content."""
     authorization_number: str
-    letter_type: str  # "approval" or "pend"
+    letter_type: str  # "submission_ready" or "needs_documentation"
     effective_date: str
     expiration_date: str | None = None
     patient_name: str
@@ -234,7 +234,7 @@ class DecisionResponse(BaseModel):
     """POST /api/decision response body."""
     request_id: str
     authorization_number: str
-    final_recommendation: str  # "approve" or "pend_for_review"
+    final_recommendation: str  # "ready_to_submit" or "needs_review"
     decided_by: str
     decided_at: str
     was_overridden: bool
