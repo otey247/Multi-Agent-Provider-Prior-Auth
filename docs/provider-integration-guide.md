@@ -33,6 +33,12 @@ This solution is intended to sit between the systems you already use and the fin
 | Document management / fax ingestion | Referral packets, payer forms, scanned records, outside clinical notes | Feeds attachment metadata or document bundles into the review workflow |
 | Payer portal / ePA connector | Final submission channel | Remains the system of record for actual payer submission unless you build a deeper integration |
 
+## Provider intake workspace example
+
+![Provider intake workspace with sample-case selection and advanced EHR-style intake](./images/readme/provider-intake-advanced.png)
+
+*Example of the provider-facing intake UI showing selectable real-world sample cases, documentation-gap context, and optional EHR/FHIR-style intake fields for payer, facility, urgency, and attachment metadata.*
+
 ## Minimum data required
 
 At a minimum, the accelerator works best when the provider can supply:

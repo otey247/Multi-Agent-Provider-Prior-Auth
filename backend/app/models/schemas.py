@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -15,7 +17,7 @@ class PriorAuthRequest(BaseModel):
     servicing_facility: str | None = None
     payer_name: str | None = None
     payer_plan: str | None = None
-    urgency: str | None = None  # "standard" | "urgent"
+    urgency: Literal["standard", "urgent"] | None = None
     place_of_service: str | None = None
     attached_note_types: list[str] = Field(default_factory=list)
     prior_treatment_history: list[str] = Field(default_factory=list)

@@ -271,4 +271,3 @@ export const SAMPLE_CASES: ProviderSampleCase[] = [
 ];
 
 export const DEFAULT_SAMPLE_CASE_ID = SAMPLE_CASES[0].id;
-export const SAMPLE_REQUEST: PriorAuthRequest = SAMPLE_CASES[0].request;
