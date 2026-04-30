@@ -40,6 +40,10 @@ interface UploadFormProps {
   onReviewComplete: (review: ReviewResponse) => void;
 }
 
+function cleanStringArray(values: string[]): string[] {
+  return values.map((value) => value.trim()).filter(Boolean);
+}
+
 const emptyRequest: PriorAuthRequest = {
   patient_name: "",
   patient_dob: "",
@@ -128,10 +132,7 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
   ) {
     updateField(
       field,
-      value
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean)
+      cleanStringArray(value.split(","))
     );
   }
 
@@ -167,10 +168,10 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
 
     const cleaned: PriorAuthRequest = {
       ...form,
-      diagnosis_codes: form.diagnosis_codes.map((c) => c.trim()).filter(Boolean),
-      procedure_codes: form.procedure_codes.map((c) => c.trim()).filter(Boolean),
-      attached_note_types: (form.attached_note_types ?? []).map((c) => c.trim()).filter(Boolean),
-      prior_treatment_history: (form.prior_treatment_history ?? []).map((c) => c.trim()).filter(Boolean),
+      diagnosis_codes: cleanStringArray(form.diagnosis_codes),
+      procedure_codes: cleanStringArray(form.procedure_codes),
+      attached_note_types: cleanStringArray(form.attached_note_types ?? []),
+      prior_treatment_history: cleanStringArray(form.prior_treatment_history ?? []),
     };
 
     submitReviewStream(
