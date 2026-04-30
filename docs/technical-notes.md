@@ -164,16 +164,16 @@ Pre-flight step before agents execute:
 
 ## Sample Data
 
-The frontend includes a **"Load Sample Case"** button for a CT-guided
-transbronchial lung biopsy case:
+The frontend now includes **multiple provider sample cases** that can be loaded from the intake screen:
 
-| Field | Value |
-|-------|-------|
-| Patient | John Smith, DOB 1958-03-15 |
-| Provider NPI | 1720180003 (active pulmonologist) |
-| ICD-10 codes | R91.1, J18.9, R05.9 |
-| CPT code | 31628 |
-| Insurance ID | MCR-123456789A |
+| Sample case | Workflow type | Example focus |
+|-------------|---------------|---------------|
+| Advanced Imaging Follow-up → Bronchoscopic Biopsy | Pulmonology | Imaging progression, biopsy readiness, specialty alignment |
+| Specialty Drug / Infusion Start of Care | Oncology | Biomarkers, line-of-therapy, site-of-care documentation |
+| Outpatient Surgery Scheduling | Orthopedics | Conservative treatment history, imaging, functional limitation |
+| DME / Home Health Oxygen Setup | Pulmonology / Home Care | Face-to-face timing, qualifying tests, supplier packet completeness |
+
+The intake form also supports an **advanced EHR/FHIR-style mode** with ordering-provider, servicing-facility, payer, urgency, attachment-type, and prior-treatment fields.
 
 ---
 

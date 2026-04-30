@@ -95,6 +95,7 @@ This is an **AI-assisted prior auth preparation tool** — all assessments are d
 |----------|-------------|
 | [Deployment Guide](./docs/DeploymentGuide.md) | Step-by-step deployment — Docker Compose, `azd up`, prerequisites, environment configuration, troubleshooting |
 | [Architecture](./docs/architecture.md) | Hosted-agent architecture, runtime modes, MCP integration, agent details, decision rubric, confidence scoring |
+| [Provider Integration Guide](./docs/provider-integration-guide.md) | Provider-facing rollout and integration guidance for EHR, RCM, referral, document, and work-queue workflows |
 | [API Reference](./docs/api-reference.md) | Full REST API documentation — endpoints, request/response schemas, SSE events, error codes |
 | [Extending](./docs/extending.md) | Add agents, MCP servers, change the decision rubric, customize notification letters |
 | [Technical Notes](./docs/technical-notes.md) | SDK patches, MCP header injection, hosted-agent dispatch, structured output, known limitations |
@@ -314,34 +315,65 @@ Pricing varies per region and usage, so it isn't possible to predict exact costs
 
 <br/>
 
-Healthcare organizations processing prior authorization (PA) requests face significant challenges in coordinating complex clinical reviews across multiple departments. They must evaluate medical necessity, verify coverage policies, and produce auditable decisions — often under strict regulatory timelines. Some of the challenges they face include:
+Provider organizations processing prior authorization (PA) requests are coordinating work across referral teams, utilization review nurses, ordering clinicians, medical directors, and revenue cycle operations. The core challenge is not just reviewing a case — it is assembling a **payer-ready provider packet** quickly enough to meet operational timelines while preserving auditability.
+
+Some of the pressures providers face include:
 
 - **High volume** — U.S. providers submit ~[300 million PA requests per year](https://www.caqh.org/insights/caqh-index-report) (CAQH Index)
-- **Manual, time-consuming reviews** — each request takes [15–20 minutes](https://web.archive.org/web/20240829144735/https://www.ama-assn.org/system/files/prior-authorization-survey.pdf) of clinician and staff time (AMA, 2024)
-- **Slow turnaround** — average PA decision takes [5–14 business days](https://www.cms.gov/newsroom/fact-sheets/cms-interoperability-and-prior-authorization-final-rule-cms-0057-f)
-- **Inconsistent assessments** — manual reviews are subject to reviewer variability
+- **Manual, time-consuming review prep** — each request takes [15–20 minutes](https://web.archive.org/web/20240829144735/https://www.ama-assn.org/system/files/prior-authorization-survey.pdf) of clinician and staff time (AMA, 2024)
+- **Slow payer turnaround** — average PA decision takes [5–14 business days](https://www.cms.gov/newsroom/fact-sheets/cms-interoperability-and-prior-authorization-final-rule-cms-0057-f)
+- **Fragmented source systems** — order details, clinical notes, imaging, payer rules, and attachments often live in different work queues
 - **Regulatory pressure** — CMS mandates [electronic PA by 2026–2027](https://www.cms.gov/newsroom/fact-sheets/cms-interoperability-and-prior-authorization-final-rule-cms-0057-f) with 72-hour urgent and 7-day standard response limits (CMS-0057-F)
 
-By using the *Prior Authorization Review — Multi-Agent Solution Accelerator*, organizations can automate these processes, ensuring that all clinical reviews are accurately coordinated, auditable, and executed efficiently.
+By using the *Provider Prior Authorization Multi-Agent Solution Accelerator*, organizations can standardize how provider teams prepare complete PA packages, identify missing evidence before submission, and preserve a human-reviewed audit trail for payer follow-up and appeal readiness.
+
+### Where this fits in a provider organization
+
+| Provider team / system | What they contribute | How this solution helps |
+|------------------------|----------------------|-------------------------|
+| Referral / scheduling | Requested service, ordering context, facility, payer, urgency | Structures intake and flags missing operational details early |
+| Utilization review / PA team | Documentation packet assembly, payer portal submission, resubmission work | Surfaces documentation gaps and submission-readiness checkpoints |
+| Ordering provider / rendering specialist | Clinical rationale, prior treatment history, diagnostics, specialty alignment | Converts clinical narrative into auditable evidence summaries |
+| Medical director / physician reviewer | Escalations, override rationale, appeal readiness | Supports human revision with full traceability |
+| Revenue cycle / authorization ops | Follow-up, status tracking, denial prevention | Standardizes outputs for work queues, letters, and downstream reporting |
+| EHR / referral / document systems | Patient, encounter, coverage, attachments, orders | Provides an orchestration layer that can sit between existing provider systems and payer workflows |
+
+### Provider workflow journey
+
+1. **Referral or order intake** — capture the requested service, ordering provider, servicing location, payer, plan, urgency, and baseline diagnosis/procedure codes.
+2. **Documentation prep** — assemble chart notes, imaging, pathology, prior treatment history, and required attachments from the EHR, referral platform, or fax/document queue.
+3. **Clinical review** — validate the story being told to the payer: severity, failed treatment, diagnostics, comorbidities, and specialty-procedure fit.
+4. **Payer submission readiness** — determine whether the packet is complete enough to submit or whether staff should pause and request missing information.
+5. **Staff follow-up** — generate a repeatable summary for the PA coordinator or revenue-cycle work queue when resubmission is needed.
+6. **Appeal readiness** — preserve an auditable summary and human override rationale if a clinician revises the AI recommendation.
+
+### Concrete provider scenarios
+
+| Scenario | Provider persona | Real-world issue | What the accelerator demonstrates |
+|----------|------------------|------------------|-----------------------------------|
+| Advanced imaging / biopsy escalation | Pulmonology PA coordinator | Imaging and consult data exist, but the final packet may still be missing indexed reports or consent support | A near-submission-ready case with imaging evidence, failed conservative treatment, and specialty alignment |
+| Specialty drug / infusion authorization | Oncology pre-cert specialist | Line-of-therapy, biomarker, site-of-care, and drug policy rules must all line up | How the workflow handles specialty drug documentation and policy mapping before first-cycle scheduling |
+| Outpatient surgery scheduling | Utilization review nurse + surgery scheduler | Conservative treatment history and imaging support must be packaged before an OR date is finalized | How clinical evidence and documentation gaps affect surgical submission readiness |
+| DME / home health setup | Discharge planner / DME coordinator | Face-to-face timing, qualifying tests, and supplier paperwork are often scattered across systems | How the workflow packages home-based service requests and highlights missing operational attachments |
 
 ### Business value
 <details>
   <summary>Click to learn more about what value this solution provides</summary>
 
-  - **Reduce review time from 20+ minutes to under 2 minutes** <br/>
+  - **Reduce packet-prep time from 20+ minutes to under 2 minutes** <br/>
   Compliance and Clinical agents run concurrently via parallel execution, dramatically reducing wall-clock time per case.
 
-  - **Ensure consistency and auditability** <br/>
-  Gate-based decision rubric with per-criterion MET/NOT_MET/INSUFFICIENT scoring eliminates reviewer variability and produces complete audit trails.
+  - **Improve first-pass submission quality** <br/>
+  Provider teams can find documentation gaps before they submit to the payer, reducing rework and avoidable pend requests.
 
   - **Maintain human oversight** <br/>
-  AI produces draft recommendations; human reviewers Accept or Override with documented rationale — every decision is traceable.
+  AI produces draft recommendations; human reviewers can submit as-is or revise with documented rationale — every decision is traceable.
 
   - **Scale without proportional staffing** <br/>
   Stateless API design enables horizontal scaling behind a load balancer. Skills-based architecture lets domain experts update clinical rules without code changes.
 
-  - **Meet regulatory requirements** <br/>
-  Automated documentation generation (notification letters, audit PDFs) supports CMS compliance and payer reporting obligations.
+  - **Support downstream appeals and audits** <br/>
+  Automated documentation generation (notification letters, audit PDFs, override summaries) gives provider teams a reusable record for payer follow-up.
 
 </details>
 
@@ -351,10 +383,10 @@ By using the *Prior Authorization Review — Multi-Agent Solution Accelerator*, 
 
   | Scenario | Persona | Challenges | Solution Approach |
   |----------|---------|------------|-------------------|
-  | PA intake triage | Utilization Review Nurse | Manually checking demographics, provider credentials, codes, and clinical notes quality for completeness is time-consuming and error-prone. | **Compliance Agent** validates all required documentation in seconds with a 10-item checklist: items 1-7 are blocking; item 9 flags NCCI CPT bundling risk; item 10 classifies service type (Procedure/Medication/Imaging/Device/Therapy/Facility) for downstream routing. |
-  | Clinical evidence review | Medical Director | Extracting structured clinical data, validating ICD-10 codes, and searching PubMed for supporting evidence takes 15–30 minutes per case. | **Clinical Reviewer Agent** automates clinical data extraction, code validation, and literature/trial search using MCP-connected healthcare data sources. |
-  | Coverage policy evaluation | PA Coordinator | Looking up Medicare NCDs/LCDs, mapping each policy criterion to clinical evidence, and documenting medical necessity assessments is manual and inconsistent. | **Coverage Agent** searches CMS coverage databases, verifies provider credentials, and produces auditable MET/NOT_MET/INSUFFICIENT criterion mappings. |
-  | Final decision synthesis | Clinical Reviewer | Combining findings from multiple reviewers into a consistent, auditable recommendation with confidence scoring requires significant coordination. | **Orchestrator + Synthesis** evaluates a gate-based rubric (Provider → Codes → Medical Necessity), produces a recommendation with confidence scores, and generates notification letters and audit PDFs. |
+  | PA intake triage | Utilization Review Nurse | Manually checking demographics, ordering context, provider credentials, codes, and note quality is time-consuming and error-prone. | **Compliance Agent** validates all required documentation in seconds with a 10-item checklist: items 1-7 are blocking; item 9 flags NCCI CPT bundling risk; item 10 classifies service type (Procedure/Medication/Imaging/Device/Therapy/Facility) for downstream routing. |
+  | Clinical evidence review | Medical Director | Extracting structured clinical data, validating ICD-10 codes, and searching literature for supporting evidence takes 15–30 minutes per case. | **Clinical Reviewer Agent** automates clinical data extraction, code validation, and literature/trial search using MCP-connected healthcare data sources. |
+  | Coverage policy evaluation | PA Coordinator | Looking up Medicare NCDs/LCDs, mapping policy criteria to clinical evidence, and documenting medical necessity assessments is manual and inconsistent. | **Coverage Agent** searches CMS coverage databases, verifies provider credentials, and produces auditable MET/NOT_MET/INSUFFICIENT criterion mappings. |
+  | Submission readiness and escalation | PA Coordinator + physician reviewer | Combining findings from multiple reviewers into a consistent packet-ready recommendation with confidence scoring requires significant coordination. | **Orchestrator + Synthesis** evaluates a gate-based rubric (Provider → Codes → Medical Necessity), produces a recommendation with confidence scores, and generates notification letters and audit PDFs for staff follow-up. |
 
 </details>
 
@@ -367,6 +399,7 @@ By using the *Prior Authorization Review — Multi-Agent Solution Accelerator*, 
 |----------|-------------|
 | [Deployment Guide](./docs/DeploymentGuide.md) | Step-by-step deployment instructions — Docker Compose, local development, Azure Container Apps, prerequisites, environment configuration, troubleshooting |
 | [Architecture](./docs/architecture.md) | Detailed hosted-agent-ready architecture, runtime modes, MCP integration, agent details, decision rubric, confidence scoring, and audit justification |
+| [Provider Integration Guide](./docs/provider-integration-guide.md) | Provider-friendly integration patterns for EHR, HL7, referral, document ingestion, and staff work queues |
 | [API Reference](./docs/api-reference.md) | Full REST API documentation — review, decision, per-agent endpoints, request/response schemas, SSE events, error codes |
 | [Foundry Hosted Agents Plan](./docs/foundry-hosted-agents-plan.md) | Saved migration plan for the lower-risk Foundry hosted-agent architecture (frontend ACA + backend/orchestrator ACA + 4 hosted agents) |
 | [Extending the Application](./docs/extending.md) | Step-by-step guides for adding new agents, MCP servers, changing the decision rubric, customizing notification letters |

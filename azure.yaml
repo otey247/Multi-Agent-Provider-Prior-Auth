@@ -767,7 +767,7 @@ hooks:
         Write-Host ""
         Write-Host " Next Steps:" -ForegroundColor White
         Write-Host "  1. Open the Frontend URL below in your browser" -ForegroundColor White
-        Write-Host "  2. Click 'Load Sample Case' and then 'Submit for Review'" -ForegroundColor White
+        Write-Host "  2. Choose a provider sample case and then 'Assess Prior Auth Packet'" -ForegroundColor White
         Write-Host "  Note: gpt-5.4 was automatically deployed by azd (DataZone Standard)" -ForegroundColor Gray
         Write-Host ""
         $frontendUrl = azd env get-value frontendUrl
@@ -778,8 +778,8 @@ hooks:
         Write-Host ""
         Write-Host " To submit a Prior Authorization request:" -ForegroundColor Green
         Write-Host "  1. Open the Frontend URL above in your browser" -ForegroundColor White
-        Write-Host "  2. Click 'Load Sample Case' to populate the form" -ForegroundColor White
-        Write-Host "  3. Click 'Submit for Review' to start the multi-agent review" -ForegroundColor White
+        Write-Host "  2. Choose a provider sample case and click 'Load Sample'" -ForegroundColor White
+        Write-Host "  3. Click 'Assess Prior Auth Packet' to start the multi-agent review" -ForegroundColor White
         Write-Host ""
         Write-Host " Backend Health Check: https://$backendUrl/health" -ForegroundColor Gray
         Write-Host ""
@@ -929,7 +929,7 @@ hooks:
         printf "${Yellow}===============================================================${NC}\n\n"
         printf "${White} Next Steps:${NC}\n"
         printf "  1. Open the Frontend URL below in your browser\n"
-        printf "  2. Click 'Load Sample Case' and then 'Submit for Review'\n"
+        printf "  2. Choose a provider sample case and then 'Assess Prior Auth Packet'\n"
         printf "  Note: gpt-5.4 was automatically deployed by azd (DataZone Standard)\n\n"
         FRONTEND_URL=$(azd env get-value frontendUrl)
         BACKEND_URL=$(azd env get-value backendUrl)
@@ -938,8 +938,8 @@ hooks:
         printf "${Blue}  Backend:   https://%s${NC}\n\n" "$BACKEND_URL"
         printf "${Green} To submit a Prior Authorization request:${NC}\n"
         printf "  1. Open the Frontend URL above in your browser\n"
-        printf "  2. Click 'Load Sample Case' to populate the form\n"
-        printf "  3. Click 'Submit for Review' to start the multi-agent review\n\n"
+        printf "  2. Choose a provider sample case and click 'Load Sample'\n"
+        printf "  3. Click 'Assess Prior Auth Packet' to start the multi-agent review\n\n"
         printf " Backend Health Check: https://%s/health\n\n" "$BACKEND_URL"
       shell: sh
       interactive: true
