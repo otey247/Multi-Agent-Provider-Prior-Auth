@@ -384,14 +384,14 @@ If all checks pass, the output shows: **"All checks passed. Ready to submit PA r
 **Quick Test Steps:**
 
 1. **Access the application** using the URL from Step 4.4
-2. Click **"Load Sample Case"** to populate the form with demo data
-3. Click **"Submit for Review"**
+2. Choose one of the built-in **provider sample cases** and click **"Load Sample"** (or enter your own intake data)
+3. Click **"Assess Prior Auth Packet"**
 4. Monitor the progress tracker — you should see all 5 phases complete
 5. Review the agent results in the dashboard tabs (Compliance, Clinical, Coverage)
-6. Use the **Decision Panel** to Accept or Override the recommendation
+6. Use the **Decision Panel** to submit as-is or revise the recommendation
 7. Download the audit PDF and notification letter
 
-> 📖 **Sample Case:** The built-in sample case demonstrates a prior authorization request for lumbar spinal fusion (CPT 22612) with degenerative disc disease (ICD-10 M51.16) — a common PA scenario requiring medical necessity evaluation.
+> 📖 **Provider Sample Cases:** The UI includes multiple realistic scenarios for advanced imaging / biopsy, specialty drug / infusion, outpatient surgery, and DME / home oxygen workflows.
 
 ### 5.3 Verify Observability (Optional)
 
@@ -516,7 +516,7 @@ If the connection is missing (e.g. after a failed provision), add it manually:
 | **Admin portal URL** | *(optional)* Your Azure Portal resource group URL |
 | **Project** | Select the auto-provisioned Microsoft Foundry project |
 | **Agent name** | `Prior Auth Orchestrator` |
-| **Description** | Multi-agent prior authorization review system. Orchestrates Clinical Reviewer, Compliance Validation, Coverage Assessment, and Synthesis agents in a fan-out/fan-in pattern to produce structured PA recommendations for human reviewers. |
+| **Description** | Provider-side multi-agent prior authorization workspace. Orchestrates Clinical Reviewer, Compliance Validation, Coverage Assessment, and Synthesis agents in a fan-out/fan-in pattern to produce structured submission-readiness guidance for provider teams. |
 
 4. Save the registration
 

@@ -957,7 +957,7 @@ def regenerate_audit_pdf_with_override(
     pdf.ln(3)
     pdf.cell(
         0, 4,
-        f"Generated: {now} | AI-Assisted Prior Authorization Review System",
+        f"Generated: {now} | AI-Assisted Provider Prior Authorization Workspace",
         align="C",
     )
 

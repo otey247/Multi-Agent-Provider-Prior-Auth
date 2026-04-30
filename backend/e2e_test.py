@@ -40,6 +40,24 @@ payload = {
         "discussed; patient consents to proceed."
     ),
     "insurance_id": "MCR-123456789A",
+    "ordering_provider_name": "Sarah Patel, MD",
+    "ordering_provider_npi": "1720180003",
+    "rendering_provider_specialty": "Pulmonology",
+    "servicing_facility": "North Valley Medical Center - Outpatient Endoscopy",
+    "payer_name": "Traditional Medicare",
+    "payer_plan": "Part B",
+    "urgency": "standard",
+    "place_of_service": "Hospital Outpatient Department",
+    "attached_note_types": [
+        "Pulmonology consult note",
+        "CT chest report",
+        "PET/CT report",
+        "Pulmonary function test",
+    ],
+    "prior_treatment_history": [
+        "14-day amoxicillin-clavulanate trial without resolution",
+        "Serial CT surveillance over 3 months with interval growth",
+    ],
 }
 
 data = json.dumps(payload).encode("utf-8")

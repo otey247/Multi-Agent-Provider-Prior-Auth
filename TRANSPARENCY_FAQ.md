@@ -13,7 +13,7 @@
     - **Coverage assessment:** Verifies provider credentials via the NPI Registry, searches CMS National and Local Coverage Determinations (NCDs/LCDs), and maps clinical evidence to each coverage criterion with auditable MET/NOT_MET/INSUFFICIENT assessments and per-criterion confidence scores.
     - **Decision synthesis:** Evaluates a three-gate decision rubric (Provider → Codes → Medical Necessity) and produces an APPROVE or PEND recommendation with confidence level and rationale.
     - **Audit trail generation:** Produces an 8-section audit justification document (Markdown and PDF) with complete data source attribution, timestamp tracking, and confidence breakdowns.
-    - **Human-in-the-loop decision panel:** Presents the AI recommendation to a human reviewer who can Accept or Override with documented rationale. Override decisions flow through to notification letters and audit records.
+    - **Human-in-the-loop decision panel:** Presents the AI recommendation to a human reviewer who can submit as-is or revise with documented rationale. Override decisions flow through to notification letters and audit records.
     - **Notification letter generation:** Produces approval or pend notification letters (text and PDF) with clinical justification data and authorization numbers.
 
 - ### What is/are the Prior Authorization Review — Multi-Agent Solution Accelerator's intended use(s)?
@@ -22,7 +22,7 @@
 
     The solution is designed to:
 
-    - Serve as a customizable starting point for organizations building AI-assisted PA review systems
+    - Serve as a customizable starting point for organizations building AI-assisted provider prior authorization preparation workflows
     - Demonstrate the multi-agent pattern using Microsoft Agent Framework with Azure OpenAI gpt-5.4 on Microsoft Foundry
     - Showcase integration with healthcare MCP servers (NPI Registry, ICD-10 Codes, CMS Coverage, PubMed, Clinical Trials)
     - Illustrate skills-based agent architecture where domain experts can update clinical rules without code changes

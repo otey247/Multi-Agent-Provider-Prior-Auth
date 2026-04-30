@@ -6,6 +6,16 @@ export interface PriorAuthRequest {
   procedure_codes: string[];
   clinical_notes: string;
   insurance_id?: string;
+  ordering_provider_name?: string;
+  ordering_provider_npi?: string;
+  rendering_provider_specialty?: string;
+  servicing_facility?: string;
+  payer_name?: string;
+  payer_plan?: string;
+  urgency?: "standard" | "urgent";
+  place_of_service?: string;
+  attached_note_types?: string[];
+  prior_treatment_history?: string[];
 }
 
 export interface ToolResult {

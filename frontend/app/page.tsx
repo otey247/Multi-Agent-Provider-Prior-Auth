@@ -19,9 +19,9 @@ export default function Home() {
 
       <footer className="border-t mt-16 py-6">
         <div className="mx-auto max-w-5xl px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-muted-foreground">
-          <span>Prior Authorization Review System</span>
+          <span>Provider Prior Authorization Workspace</span>
           <span>
-            AI-assisted draft &mdash; all decisions require human clinical review
+            AI-assisted draft &mdash; all payer submissions require human provider review
           </span>
         </div>
       </footer>

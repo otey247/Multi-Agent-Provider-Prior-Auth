@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class PriorAuthRequest(BaseModel):
@@ -9,6 +11,16 @@ class PriorAuthRequest(BaseModel):
     procedure_codes: list[str]  # CPT codes
     clinical_notes: str
     insurance_id: str | None = None
+    ordering_provider_name: str | None = None
+    ordering_provider_npi: str | None = None
+    rendering_provider_specialty: str | None = None
+    servicing_facility: str | None = None
+    payer_name: str | None = None
+    payer_plan: str | None = None
+    urgency: Literal["standard", "urgent"] | None = None
+    place_of_service: str | None = None
+    attached_note_types: list[str] = Field(default_factory=list)
+    prior_treatment_history: list[str] = Field(default_factory=list)
 
 
 class ToolResult(BaseModel):

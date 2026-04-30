@@ -88,14 +88,66 @@ prior-auth-maf/
 └── docker-compose.yml     # Local: backend + 4 agents + frontend
 ```
 
+## Where This Fits in a Provider Organization
+
+This accelerator is designed to sit **between existing provider systems and the payer submission workflow**. It does not replace the EHR, referral platform, revenue cycle work queue, or document repository. Instead, it helps the provider team assemble a stronger, more complete submission packet.
+
+| Provider source | Example system responsibility | How this solution integrates |
+|-----------------|-------------------------------|------------------------------|
+| EHR / EMR | Patient demographics, coverage, encounters, notes, observations, orders | Supplies the core case payload and supporting clinical documentation |
+| Referral / surgery / infusion platform | Authorization work queues, scheduling context, servicing location, status tracking | Triggers review before a packet is submitted or resubmitted |
+| Document management / fax intake | Referral packets, payer forms, scanned records, imaging reports | Contributes attachment metadata and missing-document follow-up |
+| Medical director / physician reviewer workflow | Escalations, peer-to-peer prep, override rationale | Consumes the synthesis summary and preserves human revision decisions |
+| Revenue cycle / authorization operations | Submission status, payer follow-up, denial prevention | Uses the output summary, documentation gaps, and audit trail in downstream work queues |
+
+## Target-State Provider Architecture
+
+### Lightweight deployment
+
+Use this when a provider wants to trial the workflow with a small intake team or a narrow specialty line.
+
+```text
+EHR / Referral Queue / Fax Intake
+            │
+            ▼
+ Provider Intake UI + FastAPI Orchestrator
+            │
+            ▼
+ 4 Hosted Agents + MCP Data Tools
+            │
+            ▼
+ Staff reviewer submits through payer portal/API
+```
+
+### Production-integrated deployment
+
+Use this when the provider wants the accelerator embedded into existing operational systems.
+
+```text
+FHIR APIs / HL7 v2 / Batch Documents / Referral Platform
+                    │
+                    ▼
+        Integration layer / event routing
+                    │
+                    ▼
+ Provider Prior Auth Orchestrator + Hosted Agents
+          │                │                 │
+          │                │                 └──► Audit PDFs / letters / override record
+          │                └──► Documentation gaps + readiness status
+          └──► Callback / webhook to EHR, RCM queue, referral worklist, or payer submission service
+```
+
+In the production-integrated pattern, the same review can be triggered:
+- when a new order enters a PA-required work queue
+- when additional documentation is attached after a payer pend
+- when a physician reviewer needs an auditable summary before revising the recommendation
+
 ## How It Works
 
 ![Prior Authorization Review — Application Interface](./images/readme/interface.png)
 *The Prior Authorization Review interface showing the PA request form, real-time agent progress tracking, review dashboard with agent details, and the human-in-the-loop decision panel.*
 
-1. A clinical reviewer fills in the PA request form in the Next.js frontend,
-   or clicks **"Load Sample Case"** to populate a demo case (CT-guided
-   lung biopsy: ICD-10 R91.1/J18.9/R05.9, CPT 31628, NPI 1720180003).
+1. A PA coordinator, utilization review nurse, or physician reviewer fills in the PA intake form in the Next.js frontend, or loads one of several provider sample cases (advanced imaging, specialty drug / infusion, outpatient surgery, or DME / home oxygen). The form supports both a simple intake path and an **advanced EHR/FHIR-style intake** with ordering-provider, payer, servicing-location, document-type, urgency, and treatment-history fields.
 
 2. The frontend POSTs to `POST /api/review/stream` on the FastAPI backend,
    opening an SSE (Server-Sent Events) connection for real-time progress.
@@ -136,7 +188,7 @@ prior-auth-maf/
 
 6. Review dashboard shows recommendation, agent details in four tabs (Compliance checklist, Clinical extraction, Coverage criteria, **Synthesis** gate pipeline + confidence breakdown), and audit justification download.
 
-7. Decision Panel supports Accept or Override flow with notification letter generation.
+7. Decision Panel supports provider staff submit-or-revise flow with notification letter generation and override traceability.
 
 ---
 

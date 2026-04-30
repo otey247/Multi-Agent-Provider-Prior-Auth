@@ -11,15 +11,49 @@ useful for programmatic/API integrations that don't need progress updates.
 
 ```json
 {
-  "patient_name": "John Smith",
-  "patient_dob": "1955-03-15",
-  "provider_npi": "1234567890",
-  "diagnosis_codes": ["M17.11", "M17.12"],
-  "procedure_codes": ["27447"],
-  "clinical_notes": "Patient presents with bilateral knee OA...",
-  "insurance_id": "ABC123456"
+  "patient_name": "Maria Gonzalez",
+  "patient_dob": "1971-11-02",
+  "provider_npi": "1437223344",
+  "diagnosis_codes": ["C78.7", "C18.7", "Z92.21"],
+  "procedure_codes": ["J9303", "96413"],
+  "clinical_notes": "Metastatic colorectal cancer progressing after FOLFOX plus bevacizumab...",
+  "insurance_id": "BCBS-TX-4472019",
+  "ordering_provider_name": "David Lin, MD",
+  "ordering_provider_npi": "1437223344",
+  "rendering_provider_specialty": "Medical Oncology",
+  "servicing_facility": "River Bend Cancer Institute Infusion Center",
+  "payer_name": "Blue Cross Blue Shield",
+  "payer_plan": "Commercial PPO",
+  "urgency": "urgent",
+  "place_of_service": "Office",
+  "attached_note_types": [
+    "Oncology progress note",
+    "Treatment history summary",
+    "CT abdomen/pelvis report",
+    "Pathology and biomarker report"
+  ],
+  "prior_treatment_history": [
+    "Completed FOLFOX plus bevacizumab with subsequent progression"
+  ]
 }
 ```
+
+**Important request fields:**
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `patient_name`, `patient_dob` | Yes | Patient identity for provider packet preparation |
+| `provider_npi` | Yes | Billing/submitting provider credential check |
+| `diagnosis_codes`, `procedure_codes` | Yes | Core ICD-10 / CPT / HCPCS context for the review |
+| `clinical_notes` | Yes | Narrative that explains medical necessity and current clinical status |
+| `insurance_id` | No | Member identifier when available |
+| `ordering_provider_name`, `ordering_provider_npi` | No | Useful for order-driven workflows and FHIR `ServiceRequest` mappings |
+| `rendering_provider_specialty` | No | Helps explain specialty-procedure fit |
+| `servicing_facility`, `place_of_service` | No | Adds operational context for surgery, infusion, imaging, and home-based workflows |
+| `payer_name`, `payer_plan` | No | Distinguishes payer/product-specific routing |
+| `urgency` | No | Supports standard vs urgent workflow handling |
+| `attached_note_types` | No | Identifies which documents are already attached to the packet |
+| `prior_treatment_history` | No | Captures conservative treatment or prior therapy context from upstream systems |
 
 **Response** (top-level synthesis + per-agent breakdown + audit trail):
 
@@ -304,6 +338,32 @@ Run the **Synthesis Decision Agent** in isolation. Requires all three upstream a
 ```
 
 **Response `result`:** The final synthesis output (recommendation, confidence, decision gates, rationale).
+
+---
+
+## Provider Integration Examples
+
+### EHR / FHIR-driven review before submission
+
+Use `POST /api/review` or `POST /api/review/stream` after assembling a packet from EHR data such as:
+- `Patient` and `Coverage` for demographics and payer context
+- `ServiceRequest` for the requested service
+- `DocumentReference` and `DiagnosticReport` for attachments
+- `Encounter`, `Condition`, and `Observation` for supporting clinical context
+
+### Resubmit after missing documentation
+
+1. Run an initial review.
+2. Capture `missing_documentation` and `documentation_gaps` from the response.
+3. Attach the missing note types or clinical addenda upstream.
+4. Re-submit the updated packet to the same review endpoint.
+
+### Human override with audit trail
+
+1. Retrieve the completed review from `GET /api/review/{request_id}`.
+2. Have a clinician or reviewer decide whether to submit as-is or revise.
+3. Call `POST /api/decision` with `action: "submit"` or `action: "revise"`.
+4. Persist the returned authorization/letter output and override rationale in the provider work queue or chart workflow.
 
 ---
 
