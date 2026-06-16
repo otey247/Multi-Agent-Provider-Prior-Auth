@@ -30,7 +30,7 @@ AGENTS = [
 
 MCP_CONNECTIONS = ["icd10", "pubmed", "clinical-trials", "npi-registry", "cms-coverage"]
 
-RUNTIME_SMOKE_AGENTS = ["clinical-reviewer-agent", "coverage-assessment-agent"]
+RUNTIME_SMOKE_AGENTS = AGENTS
 
 REQUIRED_AGENT_ENV = {
     "clinical-reviewer-agent": [
@@ -165,6 +165,57 @@ def _agent_image(definition):
     return image or definition.get("image") or "?"
 
 
+def _agent_protocols(definition):
+    """Extract registered container protocols from common SDK/CLI shapes."""
+    records = (
+        definition.get("container_protocol_versions")
+        or definition.get("containerProtocolVersions")
+        or definition.get("protocol_versions")
+        or definition.get("protocolVersions")
+        or []
+    )
+    if not isinstance(records, list):
+        return "?"
+
+    summaries = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        protocol = record.get("protocol") or record.get("name") or "?"
+        version = record.get("version") or "?"
+        summaries.append(f"{protocol}@{version}")
+
+    return ", ".join(summaries) or "?"
+
+
+def _status_fields(data):
+    """Collect concise lifecycle/status fields from a CLI agent-show payload."""
+    fields = []
+    markers = ("status", "state", "provision", "deploy")
+
+    def _walk(value, path):
+        if len(fields) >= 10:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path else key
+                key_lower = key.lower()
+                if (
+                    any(marker in key_lower for marker in markers)
+                    and not isinstance(child, (dict, list))
+                ):
+                    fields.append((child_path, str(child)))
+                elif isinstance(child, dict):
+                    _walk(child, child_path)
+                elif isinstance(child, list) and len(child) <= 4:
+                    for idx, item in enumerate(child):
+                        if isinstance(item, dict):
+                            _walk(item, f"{child_path}[{idx}]")
+
+    _walk(data, "")
+    return fields
+
+
 def _short_image(image):
     """Return a compact image name while preserving repository and tag."""
     if not image or image == "?":
@@ -198,12 +249,15 @@ def check_agents(account, project, expected_version=None):
                     if not env.get(key)
                 ]
                 image = _agent_image(defn)
+                protocols = _agent_protocols(defn)
+                status_fields = _status_fields(data)
                 version_ok = not expected_version or str(version) == str(expected_version)
                 results.append({
                     "name": name, "version": version, "status": "registered",
                     "has_ai_cs": has_ai_cs, "has_ai_cs_alt": has_ai_cs_alt,
                     "version_ok": version_ok, "missing_env": missing_env,
-                    "image": image,
+                    "image": image, "protocols": protocols,
+                    "status_fields": status_fields,
                 })
                 if not version_ok or missing_env:
                     all_ok = False
@@ -211,13 +265,15 @@ def check_agents(account, project, expected_version=None):
                 results.append({"name": name, "version": "?", "status": "not found",
                                 "has_ai_cs": False, "has_ai_cs_alt": False,
                                 "version_ok": False, "missing_env": [],
-                                "image": "?"})
+                                "image": "?", "protocols": "?",
+                                "status_fields": []})
                 all_ok = False
         except Exception:
             results.append({"name": name, "version": "?", "status": "error",
                             "has_ai_cs": False, "has_ai_cs_alt": False,
                             "version_ok": False, "missing_env": [],
-                            "image": "?"})
+                            "image": "?", "protocols": "?",
+                            "status_fields": []})
             all_ok = False
 
     print(f"\n  {'Agent':<30} {'Version':>8}  {'AI CS':>6}  {'Env':>5}  {'Image':<28} {'Status':<12}")
@@ -233,6 +289,11 @@ def check_agents(account, project, expected_version=None):
         )
     print()
 
+    print("  Registered protocols:")
+    for r in results:
+        print(f"  {r['name']:<30} {r['protocols']}")
+    print()
+
     # Warnings
     for r in results:
         if r["status"] == "registered" and not r["has_ai_cs"]:
@@ -244,6 +305,18 @@ def check_agents(account, project, expected_version=None):
                 f"  ERROR: {r['name']} missing required runtime env: "
                 f"{', '.join(r['missing_env'])}"
             )
+
+    printed_status_header = False
+    for r in results:
+        if r["status_fields"]:
+            if not printed_status_header:
+                print()
+                print("  Lifecycle/status fields:")
+                printed_status_header = True
+            summary = "; ".join(
+                f"{key}={value[:80]}" for key, value in r["status_fields"]
+            )
+            print(f"  {r['name']:<30} {summary}")
 
     return all_ok, results
 
@@ -398,6 +471,76 @@ def _runtime_smoke_payload(agent_name):
             },
         }
 
+    if agent_name == "synthesis-agent":
+        compliance_result = {
+            "agent_name": "Documentation Completeness Agent",
+            "overall_status": "complete",
+            "checklist": [
+                {"item": "Patient demographics", "status": "complete", "detail": "Present"},
+                {"item": "Provider NPI", "status": "complete", "detail": "Present"},
+                {"item": "Clinical notes", "status": "complete", "detail": "Present"},
+            ],
+            "missing_items": [],
+        }
+        clinical_result = {
+            "agent_name": "Clinical Evidence Retrieval Agent",
+            "diagnosis_validation": [
+                {
+                    "code": "J44.9",
+                    "valid": True,
+                    "billable": True,
+                    "description": "Chronic obstructive pulmonary disease",
+                }
+            ],
+            "clinical_extraction": {
+                "chief_complaint": "Hypoxemia",
+                "history_of_present_illness": request_data["clinical_notes"],
+                "prior_treatments": ["Inhaled bronchodilator therapy"],
+                "severity_indicators": ["Oxygen saturation 87 percent"],
+                "diagnostic_findings": [],
+                "extraction_confidence": 80,
+            },
+            "clinical_summary": "Smoke-test clinical findings.",
+            "tool_results": [],
+        }
+        coverage_result = {
+            "agent_name": "Policy Matching Agent",
+            "provider_verification": {
+                "npi": "1912084401",
+                "name": "Runtime Smoke Provider",
+                "specialty": "Internal Medicine",
+                "status": "VERIFIED",
+            },
+            "coverage_policies": [],
+            "criteria_assessment": [
+                {
+                    "criterion": "Provider credential verification",
+                    "status": "MET",
+                    "confidence": 90,
+                    "evidence": ["Smoke-test provider verified"],
+                },
+                {
+                    "criterion": "Medical necessity fallback",
+                    "status": "MET",
+                    "confidence": 80,
+                    "evidence": ["Oxygen saturation 87 percent"],
+                },
+            ],
+            "documentation_gaps": [],
+            "tool_results": [],
+        }
+        return {
+            "request": request_data,
+            "compliance_result": compliance_result,
+            "clinical_result": clinical_result,
+            "coverage_result": coverage_result,
+            "cpt_validation": {
+                "valid": True,
+                "summary": "1/1 codes valid format",
+                "results": [{"code": "E1390", "valid_format": True}],
+            },
+        }
+
     return request_data
 
 
@@ -462,7 +605,7 @@ def _invoke_runtime_smoke(agent_name, endpoint, token):
 
 
 def check_runtime_smoke(account, project):
-    """Live invoke clinical and coverage agents through Foundry Responses API."""
+    """Live invoke hosted agents through Foundry Responses API."""
     _section("Hosted Agent Runtime Smoke Test")
     endpoint = _project_endpoint(account, project)
     if not endpoint:
@@ -493,7 +636,7 @@ def main():
     parser.add_argument(
         "--runtime",
         action="store_true",
-        help="Invoke clinical and coverage hosted agents to verify live runtime execution",
+        help="Invoke all hosted agents to verify live runtime execution",
     )
     args = parser.parse_args()
 

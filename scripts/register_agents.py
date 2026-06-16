@@ -27,6 +27,8 @@ Optional environment variables:
                                            to Hosted Agents because the platform
                                            reserves App Insights env names.
   IMAGE_TAG                             — ACR image tag (default: latest)
+  HOSTED_AGENT_RESPONSES_PROTOCOL_VERSION — Responses container protocol version
+                                            (default: v0.1.1)
 """
 
 import os
@@ -175,7 +177,10 @@ def _build_hosted_agent_definition(
     protocol_records = [
         ProtocolVersionRecord(
             protocol=AgentProtocol.RESPONSES,
-            version="1.0.0",
+            version=os.environ.get(
+                "HOSTED_AGENT_RESPONSES_PROTOCOL_VERSION",
+                "v0.1.1",
+            ),
         )
     ]
     common = {
@@ -328,6 +333,10 @@ def run() -> None:
     model_name = _clean_env_value(os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-5.4"))
     app_insights_cs = os.environ.get("APPLICATION_INSIGHTS_CONNECTION_STRING", "")
     image_tag = _clean_env_value(os.environ.get("IMAGE_TAG", "latest"))
+    responses_protocol_version = os.environ.get(
+        "HOSTED_AGENT_RESPONSES_PROTOCOL_VERSION",
+        "v0.1.1",
+    )
     subscription_id = _clean_env_value(os.environ.get("AZURE_SUBSCRIPTION_ID", ""))
     resource_group = _clean_env_value(os.environ.get("AZURE_RESOURCE_GROUP", ""))
 
@@ -356,6 +365,7 @@ def run() -> None:
         sys.exit(1)
 
     print(f"  Foundry project endpoint: {project_endpoint}")
+    print(f"  Hosted Responses protocol: responses@{responses_protocol_version}")
     if not acr_endpoint:
         print("ERROR: AZURE_CONTAINER_REGISTRY_ENDPOINT is not set.", file=sys.stderr)
         sys.exit(1)

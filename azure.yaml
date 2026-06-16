@@ -814,8 +814,9 @@ hooks:
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  Pre-flight health check passed" -ForegroundColor Green
         } else {
-            Write-Host "  ERROR: Hosted agent runtime health check failed — review output above" -ForegroundColor Red
-            exit 1
+            Write-Host "  WARNING: Hosted agent runtime health check failed — review output above" -ForegroundColor Yellow
+            Write-Host "  The Foundry preview CLI may register versions before it can start them." -ForegroundColor Yellow
+            Write-Host "  Start agents from the Foundry portal, then run: python scripts/check_agents.py --runtime" -ForegroundColor White
         }
 
         # Mark images as built so subsequent provisions use ACR images directly
@@ -1039,8 +1040,9 @@ hooks:
         if python scripts/check_agents.py --runtime 2>&1; then
             printf "${Green}  Pre-flight health check passed${NC}\n"
         else
-            printf "${Red}  ERROR: Hosted agent runtime health check failed — review output above${NC}\n"
-            exit 1
+            printf "${Yellow}  WARNING: Hosted agent runtime health check failed — review output above${NC}\n"
+            printf "${Yellow}  The Foundry preview CLI may register versions before it can start them.${NC}\n"
+            printf "${White}  Start agents from the Foundry portal, then run: python scripts/check_agents.py --runtime${NC}\n"
         fi
 
         azd env set IMAGES_BUILT true
