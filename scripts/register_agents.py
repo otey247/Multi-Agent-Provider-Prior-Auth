@@ -100,6 +100,63 @@ def _normalize_project_endpoint(
     return normalized.rstrip("/")
 
 
+def _run_agent_start_command(
+    account_name: str,
+    project_name: str,
+    agent_name: str,
+    version_num: str,
+) -> tuple[bool, str]:
+    """Start a hosted agent, trying known CLI parameter variants.
+
+    The Foundry Hosted Agent CLI surface is preview and has changed between
+    extension versions. Keep the variants narrow, and return stderr so the
+    deployment log preserves the real Azure CLI failure instead of only exit
+    code 3.
+    """
+    base_cmd = [
+        "az",
+        "cognitiveservices",
+        "agent",
+        "start",
+        "--account-name",
+        account_name,
+        "--project-name",
+        project_name,
+        "--name",
+        agent_name,
+    ]
+    variants = [
+        base_cmd + ["--agent-version", version_num],
+        base_cmd + ["--version", version_num],
+        base_cmd,
+    ]
+
+    failures: list[str] = []
+    for cmd in variants:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+        )
+        output = "\n".join(
+            part.strip() for part in (result.stdout, result.stderr) if part.strip()
+        )
+
+        if result.returncode == 0:
+            return True, output
+
+        if "already exists with status Running" in output:
+            return True, output
+
+        failures.append(
+            f"$ {' '.join(cmd)}\n"
+            f"exit={result.returncode}\n"
+            f"{output or '(no output)'}"
+        )
+
+    return False, "\n\n".join(failures)
+
+
 # ---------------------------------------------------------------------------
 # MCP tool connection definitions
 # ---------------------------------------------------------------------------
@@ -459,32 +516,20 @@ def run() -> None:
 
         print(f"  Starting {name} (version {version_num})...", end="", flush=True)
         try:
-            subprocess.run(
-                [
-                    "az",
-                    "cognitiveservices",
-                    "agent",
-                    "start",
-                    "--account-name",
-                    account_name,
-                    "--project-name",
-                    project_name,
-                    "--name",
-                    name,
-                    "--agent-version",
-                    str(version_num),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
+            started, detail = _run_agent_start_command(
+                account_name,
+                project_name,
+                name,
+                str(version_num),
             )
-            print(" started")
-        except subprocess.CalledProcessError as exc:
-            if "already exists with status Running" in (exc.stderr or ""):
-                print(" already running")
+            if started:
+                print(" started")
+                if detail:
+                    print(f"    {detail}")
             else:
                 print(
-                    f" WARNING: could not auto-start via CLI ({exc.returncode}).\n"
+                    " WARNING: could not auto-start via CLI.\n"
+                    f"{detail}\n"
                     f"  Manually start from Foundry portal: Agents > {name} > Start",
                 )
         except FileNotFoundError:

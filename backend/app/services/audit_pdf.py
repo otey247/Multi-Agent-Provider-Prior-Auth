@@ -8,8 +8,8 @@ Returns base64-encoded PDF bytes for JSON transport.
 """
 
 import base64
-import io
 from datetime import datetime, timezone
+from typing import Any
 
 from fpdf import FPDF
 
@@ -33,6 +33,16 @@ _WHITE = (255, 255, 255)
 
 class _AuditPDF(FPDF):
     """Custom FPDF subclass for audit justification documents."""
+
+    def cell(self, *args: Any, **kwargs: Any) -> Any:
+        """Render a cell after normalizing text for built-in PDF fonts."""
+        args, kwargs = _safe_pdf_text_arg(args, kwargs)
+        return super().cell(*args, **kwargs)
+
+    def multi_cell(self, *args: Any, **kwargs: Any) -> Any:
+        """Render a multi-cell after normalizing text for built-in PDF fonts."""
+        args, kwargs = _safe_pdf_text_arg(args, kwargs)
+        return super().multi_cell(*args, **kwargs)
 
     def header(self) -> None:
         self.set_font("Helvetica", "B", 10)
@@ -64,6 +74,25 @@ class _AuditPDF(FPDF):
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+
+def _safe_pdf_text_arg(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    text_index: int = 2,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Normalize the text argument accepted by fpdf2 cell/multi_cell methods."""
+    safe_args = list(args)
+    safe_kwargs = dict(kwargs)
+
+    if len(safe_args) > text_index:
+        safe_args[text_index] = _safe_str(safe_args[text_index])
+
+    for key in ("text", "txt"):
+        if key in safe_kwargs:
+            safe_kwargs[key] = _safe_str(safe_kwargs[key])
+
+    return tuple(safe_args), safe_kwargs
+
 
 def _section_heading(pdf: FPDF, number: int, title: str) -> None:
     """Render a numbered section heading with blue underline."""
@@ -131,7 +160,7 @@ def _confidence_bar(pdf: FPDF, value: float, level: str) -> None:
         pdf.set_fill_color(*_RED_TEXT)
     pdf.rect(x, y, bar_width * pct, bar_height, "F")
 
-    # Label — at x=73, well within right margin at x=200
+    # Label at x=73, well within right margin at x=200
     pdf.set_font("Helvetica", "B", 9)
     pdf.set_text_color(*_BLACK)
     pdf.set_xy(x + bar_width + 3, y)
@@ -206,6 +235,13 @@ def _safe_str(value) -> str:
     return s
 
 
+def _pdf_to_base64(pdf: FPDF) -> str:
+    """Return base64-encoded PDF bytes across fpdf output variants."""
+    output = pdf.output(dest="S")
+    pdf_bytes = output.encode("latin-1") if isinstance(output, str) else bytes(output)
+    return base64.b64encode(pdf_bytes).decode("ascii")
+
+
 def _check_page_space(pdf: FPDF, needed: float) -> None:
     """Add a new page if insufficient space remains."""
     if pdf.get_y() + needed > pdf.h - 25:
@@ -256,7 +292,7 @@ def _render_section_2_medical_necessity(
     _check_page_space(pdf, 40)
     _section_heading(pdf, 2, "Clinical Evidence Assessment")
 
-    # Provider info — normalize the data before rendering
+    # Provider info: normalize the data before rendering
     pv = coverage_result.get("provider_verification", {})
     if pv and isinstance(pv, dict):
         provider_name = pv.get("name", "")
@@ -608,7 +644,7 @@ def _render_section_5_decision_rationale(
     met_criteria = synthesis.get("coverage_criteria_met", [])
     if met_criteria:
         pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(0, 6, "Payer Requirements Met — Key Evidence:")
+        pdf.cell(0, 6, "Payer Requirements Met - Key Evidence:")
         pdf.ln(5)
         for m in met_criteria:
             _bullet(pdf, m)
@@ -684,7 +720,7 @@ def _render_section_8_regulatory_compliance(pdf: FPDF) -> None:
     pdf.ln(5)
     pdf.set_font("Helvetica", "", 9)
     _bullet(pdf, "Provider credential check: Required before submission")
-    _bullet(pdf, "Code validation: Required — coding errors cause avoidable denials")
+    _bullet(pdf, "Code validation: Required - coding errors cause avoidable denials")
     _bullet(pdf, "Payer policy requirements: All must be MET for ready-to-submit status")
     _bullet(pdf, "Unmet/insufficient requirements: Flagged as needs-review (not a denial)")
     _bullet(pdf, "Human review required: Before final submission to payer")
@@ -808,10 +844,7 @@ def generate_audit_justification_pdf(
     _render_disclaimer_footer(pdf, now)
 
     # --- Output to base64 ---
-    buf = io.BytesIO()
-    pdf.output(buf)
-    pdf_bytes = buf.getvalue()
-    return base64.b64encode(pdf_bytes).decode("ascii")
+    return _pdf_to_base64(pdf)
 
 
 def regenerate_audit_pdf_with_override(
@@ -961,7 +994,4 @@ def regenerate_audit_pdf_with_override(
         align="C",
     )
 
-    buf = io.BytesIO()
-    pdf.output(buf)
-    pdf_bytes = buf.getvalue()
-    return base64.b64encode(pdf_bytes).decode("ascii")
+    return _pdf_to_base64(pdf)

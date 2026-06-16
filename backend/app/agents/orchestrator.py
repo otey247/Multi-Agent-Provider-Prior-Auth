@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from app.agents.compliance_agent import run_compliance_review
@@ -104,6 +105,13 @@ _CHECKLIST_STATUS_MAP: dict[str, str] = {
     "complete": "pass",
     "incomplete": "warning",
     "missing": "fail",
+}
+
+_FALLBACK_TOOL_NAMES = {
+    "foundry_clinical_agent",
+    "clinical_fallback",
+    "foundry_coverage_agent",
+    "coverage_fallback",
 }
 
 
@@ -267,6 +275,301 @@ def _normalize_coverage_result(coverage_result: dict) -> dict:
     return result
 
 
+def _uses_agent_fallback(result: dict) -> bool:
+    """Return True when a result was produced by local conservative fallback."""
+    return bool(result.get("_fallback_reason"))
+
+
+def _is_fallback_tool_result(tool_result: dict) -> bool:
+    """Return True for diagnostic fallback tool results kept in agent details only."""
+    return str(tool_result.get("tool_name", "")).lower() in _FALLBACK_TOOL_NAMES
+
+
+def _normalize_recommendation_value(value) -> str:
+    """Normalize agent recommendation variants to the API contract."""
+    normalized = str(value or "needs_review").strip().lower().replace(" ", "_")
+    if normalized in ("approve", "approved", "ready", "ready_to_submit"):
+        return "ready_to_submit"
+    if normalized in ("pend", "pended", "pend_for_review", "needs_review", "manual_review"):
+        return "needs_review"
+    return normalized or "needs_review"
+
+
+def _apply_fallback_synthesis_guardrails(
+    synthesis: dict,
+    clinical_result: dict,
+    coverage_result: dict,
+) -> dict:
+    """Keep top-level synthesis conservative when upstream agents used fallback."""
+    if not (_uses_agent_fallback(clinical_result) or _uses_agent_fallback(coverage_result)):
+        return synthesis
+
+    guarded = dict(synthesis)
+    guarded["recommendation"] = "needs_review"
+    try:
+        confidence = float(guarded.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    guarded["confidence"] = min(confidence, 0.35)
+    guarded["confidence_level"] = "LOW"
+
+    if _uses_agent_fallback(coverage_result):
+        guarded["coverage_criteria_met"] = []
+        guarded["coverage_criteria_not_met"] = [
+            "Provider credential verification not completed - manual NPI/payer verification required",
+            "Payer policy and medical necessity match not completed - manual policy review required",
+        ]
+        guarded["criteria_summary"] = (
+            "0 payer policy requirements verified; manual review required"
+        )
+        guarded["decision_gate"] = "manual_review_required"
+
+    missing = list(guarded.get("missing_documentation") or [])
+    required_items = [
+        "Manual provider credential verification against NPPES or payer records",
+        "Manual payer policy review confirming applicable LCD/NCD or payer-specific criteria",
+    ]
+    if _uses_agent_fallback(clinical_result):
+        required_items.append(
+            "Manual clinical evidence review because ICD-10, PubMed, and clinical-trial MCP checks did not complete"
+        )
+    for item in required_items:
+        if item not in missing:
+            missing.append(item)
+    guarded["missing_documentation"] = missing
+
+    fallback_note = (
+        "Hosted clinical and/or coverage agents were unavailable, so this result "
+        "uses conservative local fallback data. Treat all credential, diagnosis "
+        "billability, literature, trial, and payer-policy findings as not verified "
+        "until staff completes manual review."
+    )
+    existing_rationale = str(guarded.get("clinical_rationale") or "").strip()
+    if fallback_note not in existing_rationale:
+        guarded["clinical_rationale"] = (
+            f"{fallback_note}\n\n{existing_rationale}" if existing_rationale else fallback_note
+        )
+
+    return guarded
+
+
+def _is_hosted_agent_error(result: dict) -> bool:
+    """Return True for transport/runtime errors from hosted agent invocation."""
+    error = str(result.get("error") or "")
+    if not error:
+        return False
+    return any(
+        marker in error
+        for marker in (
+            "Foundry Hosted Agent",
+            "Hosted clinical-reviewer-agent call failed",
+            "Hosted coverage-assessment-agent call failed",
+            "call timed out",
+            "is not reachable",
+        )
+    )
+
+
+def _fallback_detail(agent_label: str) -> str:
+    """User-facing status for conservative local fallback."""
+    return (
+        f"{agent_label} hosted runtime unavailable; "
+        "using conservative local fallback. Manual verification required."
+    )
+
+
+def _looks_like_icd10(code: str) -> bool:
+    """Basic ICD-10-CM format check used only when the clinical agent is down."""
+    return bool(re.match(r"^[A-Z][0-9][A-Z0-9](?:\.[A-Z0-9]{1,4})?$", code.strip().upper()))
+
+
+def _first_sentence(text: str, max_len: int = 240) -> str:
+    """Extract a short human-readable note snippet for fallback summaries."""
+    cleaned = " ".join(str(text or "").split())
+    if not cleaned:
+        return ""
+
+    parts = re.split(r"(?<=[.!?])\s+", cleaned, maxsplit=1)
+    return parts[0][:max_len]
+
+
+def _coerce_list(value) -> list[str]:
+    """Return a list of strings from user-provided scalar/list values."""
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if value:
+        return [str(value)]
+    return []
+
+
+def _build_clinical_fallback_result(
+    request_data: dict,
+    cpt_validation: dict,
+    error_detail: str,
+) -> dict:
+    """Build a conservative clinical result when the hosted clinical agent fails."""
+    diagnosis_codes = [str(code).strip().upper() for code in request_data.get("diagnosis_codes", [])]
+    notes = str(request_data.get("clinical_notes") or "")
+    prior_treatments = _coerce_list(request_data.get("prior_treatment_history"))
+    note_snippet = _first_sentence(notes)
+
+    diagnosis_validation = [
+        {
+            "code": code,
+            "valid": _looks_like_icd10(code),
+            "description": "Format-only validation; ICD-10 MCP lookup was not completed.",
+            "billable": False,
+            "hierarchy_note": "Billable status requires ICD-10 MCP verification.",
+        }
+        for code in diagnosis_codes
+    ]
+
+    procedure_validation = [
+        {
+            "code": item.get("code", ""),
+            "valid": bool(item.get("valid_format")),
+            "description": item.get("description") or item.get("detail", ""),
+            "source": "orchestrator_preflight",
+        }
+        for item in cpt_validation.get("results", [])
+        if isinstance(item, dict)
+    ]
+
+    extraction_confidence = 35 if notes.strip() else 10
+    if prior_treatments:
+        extraction_confidence += 10
+
+    return {
+        "agent_name": "Clinical Reviewer Agent",
+        "diagnosis_validation": diagnosis_validation,
+        "procedure_validation": procedure_validation,
+        "clinical_extraction": {
+            "chief_complaint": note_snippet,
+            "history_of_present_illness": notes[:1000],
+            "prior_treatments": prior_treatments,
+            "severity_indicators": [],
+            "functional_limitations": [],
+            "diagnostic_findings": [],
+            "duration_and_progression": "",
+            "medical_history_and_comorbidities": "",
+            "extraction_confidence": min(extraction_confidence, 45),
+        },
+        "literature_support": [],
+        "clinical_trials": [],
+        "clinical_summary": (
+            "Hosted clinical review was unavailable. Local fallback used submitted "
+            "clinical notes and CPT/HCPCS preflight only; ICD-10, PubMed, and "
+            "ClinicalTrials.gov checks require manual review."
+        ),
+        "tool_results": [
+            {
+                "tool_name": "foundry_clinical_agent",
+                "status": "info",
+                "detail": _fallback_detail("Clinical"),
+            },
+            {
+                "tool_name": "clinical_fallback",
+                "status": "info",
+                "detail": "Local note extraction used; external clinical MCP tools were not completed.",
+            },
+        ],
+        "checks_performed": [],
+        "_fallback_reason": _fallback_detail("Clinical"),
+        "_hosted_agent_error": str(error_detail)[:500],
+    }
+
+
+def _build_coverage_fallback_result(
+    request_data: dict,
+    clinical_result: dict,
+    error_detail: str,
+) -> dict:
+    """Build conservative coverage output when the hosted coverage agent fails."""
+    provider_npi = str(
+        request_data.get("ordering_provider_npi")
+        or request_data.get("provider_npi")
+        or ""
+    )
+    provider_name = str(request_data.get("ordering_provider_name") or "")
+    specialty = str(request_data.get("rendering_provider_specialty") or "")
+    provider_display = provider_name or (f"NPI {provider_npi}" if provider_npi else "")
+
+    notes_present = bool(str(request_data.get("clinical_notes") or "").strip())
+    clinical_extraction = clinical_result.get("clinical_extraction") or {}
+    if not isinstance(clinical_extraction, dict):
+        clinical_extraction = {}
+    has_clinical_evidence = notes_present or bool(clinical_extraction.get("chief_complaint"))
+
+    criteria = [
+        {
+            "criterion": "Provider credential verification",
+            "status": "INSUFFICIENT",
+            "confidence": 20,
+            "evidence": [f"NPI provided: {provider_npi}" if provider_npi else "No NPI available"],
+            "notes": "NPI registry lookup was not completed because the hosted coverage agent was unavailable.",
+            "source": "coverage_fallback",
+            "met": False,
+        },
+        {
+            "criterion": "Payer policy and medical necessity match",
+            "status": "INSUFFICIENT",
+            "confidence": 25 if has_clinical_evidence else 10,
+            "evidence": ["Submitted clinical notes present"] if has_clinical_evidence else ["Clinical evidence not available"],
+            "notes": "CMS coverage policy search was not completed. Human review must verify payer criteria.",
+            "source": "coverage_fallback",
+            "met": False,
+        },
+    ]
+
+    return {
+        "agent_name": "Coverage Agent",
+        "provider_verification": {
+            "npi": provider_npi,
+            "name": provider_display,
+            "specialty": specialty,
+            "status": "UNVERIFIED",
+            "detail": "NPI registry lookup not completed; verify provider credentials manually.",
+        },
+        "coverage_policies": [],
+        "criteria_assessment": criteria,
+        "coverage_criteria_met": [],
+        "coverage_criteria_not_met": [
+            c["criterion"] for c in criteria if c.get("source") == "coverage_fallback"
+        ],
+        "policy_references": [],
+        "coverage_limitations": [
+            "Coverage policy search unavailable; payer requirements must be checked manually."
+        ],
+        "documentation_gaps": [
+            {
+                "what": "Manual provider credential verification required",
+                "critical": True,
+                "request": "Verify NPI, provider status, and specialty against NPPES or payer records.",
+            },
+            {
+                "what": "Manual payer policy criteria review required",
+                "critical": True,
+                "request": "Confirm applicable LCD/NCD or payer-specific prior authorization criteria.",
+            },
+        ],
+        "tool_results": [
+            {
+                "tool_name": "foundry_coverage_agent",
+                "status": "info",
+                "detail": _fallback_detail("Coverage"),
+            },
+            {
+                "tool_name": "coverage_fallback",
+                "status": "info",
+                "detail": "Local conservative criteria used; NPI and CMS coverage MCP tools were not completed.",
+            },
+        ],
+        "checks_performed": [],
+        "_fallback_reason": _fallback_detail("Coverage"),
+        "_hosted_agent_error": str(error_detail)[:500],
+    }
+
+
 def _build_audit_trail(
     compliance_result: dict,
     clinical_result: dict,
@@ -276,10 +579,20 @@ def _build_audit_trail(
 ) -> dict:
     """Build audit trail from agent results."""
     data_sources = ["CPT/HCPCS Format Validation (Local)"]
+    clinical_fallback = _uses_agent_fallback(clinical_result)
+    coverage_fallback = _uses_agent_fallback(coverage_result)
+
+    if clinical_fallback:
+        data_sources.append("Clinical fallback extraction (Local)")
+    if coverage_fallback:
+        data_sources.append("Coverage fallback assessment (Local)")
 
     # Check which MCP tools were used via tool_results
     for result in [clinical_result, coverage_result]:
         for tr in result.get("tool_results", []):
+            if _is_fallback_tool_result(tr):
+                continue
+
             tool = tr.get("tool_name", "")
             tool_lower = tool.lower()
             if "npi" in tool_lower:
@@ -303,21 +616,24 @@ def _build_audit_trail(
     # Always infer data sources from result data to supplement tool_results
     # (agents may not always report tool_results for every MCP call)
 
-    # If provider verification has data, NPI registry was used
+    # If provider verification has data, NPI registry was used unless it came
+    # from local fallback, where the registry lookup explicitly did not run.
     pv = coverage_result.get("provider_verification", {})
-    if pv and isinstance(pv, dict) and pv.get("npi"):
+    if not coverage_fallback and pv and isinstance(pv, dict) and pv.get("npi"):
         if "NPI Registry MCP (NPPES)" not in data_sources:
             data_sources.append("NPI Registry MCP (NPPES)")
 
-    # If diagnosis validation has data, ICD-10 MCP was used
+    # If diagnosis validation has data, ICD-10 MCP was used unless it came
+    # from local fallback format-only validation.
     dx = clinical_result.get("diagnosis_validation", [])
-    if dx:
+    if not clinical_fallback and dx:
         if "ICD-10 MCP (2026 Code Set)" not in data_sources:
             data_sources.append("ICD-10 MCP (2026 Code Set)")
 
-    # If coverage policies found, CMS Coverage MCP was used
+    # If coverage policies found, CMS Coverage MCP was used unless coverage
+    # fallback is active.
     policies = coverage_result.get("coverage_policies", [])
-    if policies:
+    if not coverage_fallback and policies:
         if "CMS Coverage MCP (LCDs/NCDs)" not in data_sources:
             data_sources.append("CMS Coverage MCP (LCDs/NCDs)")
 
@@ -333,17 +649,19 @@ def _build_audit_trail(
         if "ClinicalTrials.gov MCP" not in data_sources:
             data_sources.append("ClinicalTrials.gov MCP")
 
-    # Ensure all 5 MCP data sources are always listed — all servers are
-    # queried on every review run, even if they return zero results
-    for source in [
-        "NPI Registry MCP (NPPES)",
-        "ICD-10 MCP (2026 Code Set)",
-        "CMS Coverage MCP (LCDs/NCDs)",
-        "PubMed MCP (Biomedical Literature)",
-        "ClinicalTrials.gov MCP",
-    ]:
-        if source not in data_sources:
-            data_sources.append(source)
+    # In a fully hosted run all 5 MCP sources are queried even if they return
+    # no results. During fallback, list only the local fallback sources above
+    # so the audit trail does not imply unavailable MCP tools were consulted.
+    if not (clinical_fallback or coverage_fallback):
+        for source in [
+            "NPI Registry MCP (NPPES)",
+            "ICD-10 MCP (2026 Code Set)",
+            "CMS Coverage MCP (LCDs/NCDs)",
+            "PubMed MCP (Biomedical Literature)",
+            "ClinicalTrials.gov MCP",
+        ]:
+            if source not in data_sources:
+                data_sources.append(source)
 
     # Extraction confidence
     extraction = clinical_result.get("clinical_extraction", {})
@@ -709,8 +1027,21 @@ async def _run_review_pipeline(
         p1_span.set_attribute("agent.clinical.status",
                               "error" if clinical_result.get("error") else "success")
 
+    if _is_hosted_agent_error(clinical_result):
+        logger.warning(
+            "Clinical hosted agent failed; using conservative fallback: %s",
+            clinical_result.get("error"),
+        )
+        clinical_result = _build_clinical_fallback_result(
+            clinical_request,
+            cpt_validation,
+            clinical_result.get("error", ""),
+        )
+
     # Build per-agent status with validation warnings
     def _agent_status(name: str, result: dict, ok_msg: str) -> dict:
+        if _uses_agent_fallback(result):
+            return {"status": "warning", "detail": result["_fallback_reason"]}
         if result.get("error"):
             return {"status": "error", "detail": result["error"]}
         missing = _validate_agent_result(name, result)
@@ -752,6 +1083,17 @@ async def _run_review_pipeline(
             "Coverage Agent", run_coverage_review, request_data, clinical_result
         )
 
+        if _is_hosted_agent_error(coverage_result):
+            logger.warning(
+                "Coverage hosted agent failed; using conservative fallback: %s",
+                coverage_result.get("error"),
+            )
+            coverage_result = _build_coverage_fallback_result(
+                request_data,
+                clinical_result,
+                coverage_result.get("error", ""),
+            )
+
         # Normalize coverage result (fix provider data format, etc.)
         coverage_result = _normalize_coverage_result(coverage_result)
 
@@ -784,6 +1126,12 @@ async def _run_review_pipeline(
         synthesis = await _run_synthesis(
             request_data, compliance_result, clinical_result, coverage_result,
             cpt_validation,
+        )
+
+        synthesis = _apply_fallback_synthesis_guardrails(
+            synthesis,
+            clinical_result,
+            coverage_result,
         )
 
         p3_span.set_attribute("synthesis.recommendation",
@@ -895,11 +1243,11 @@ async def _run_review_pipeline(
         }
 
     for tr in clinical_result.get("tool_results", []):
-        if isinstance(tr, dict):
+        if isinstance(tr, dict) and not _is_fallback_tool_result(tr):
             all_tool_results.append(_normalize_tool_result(tr))
 
     for tr in coverage_result.get("tool_results", []):
-        if isinstance(tr, dict):
+        if isinstance(tr, dict) and not _is_fallback_tool_result(tr):
             all_tool_results.append(_normalize_tool_result(tr))
 
     # If agents didn't report tool_results, synthesize from available data
@@ -907,7 +1255,11 @@ async def _run_review_pipeline(
 
     # ICD-10 validation from clinical agent
     dx_val = clinical_result.get("diagnosis_validation", [])
-    if dx_val and not any("icd" in t.lower() or "diagnosis" in t.lower() for t in existing_tools):
+    if (
+        dx_val
+        and not _uses_agent_fallback(clinical_result)
+        and not any("icd" in t.lower() or "diagnosis" in t.lower() for t in existing_tools)
+    ):
         valid_count = sum(1 for d in dx_val if isinstance(d, dict) and d.get("valid"))
         billable_count = sum(1 for d in dx_val if isinstance(d, dict) and d.get("billable"))
         total = len(dx_val)
@@ -919,7 +1271,13 @@ async def _run_review_pipeline(
 
     # NPI verification from coverage agent
     pv = coverage_result.get("provider_verification", {})
-    if pv and isinstance(pv, dict) and pv.get("npi") and not any("npi" in t.lower() for t in existing_tools):
+    if (
+        pv
+        and isinstance(pv, dict)
+        and pv.get("npi")
+        and not _uses_agent_fallback(coverage_result)
+        and not any("npi" in t.lower() for t in existing_tools)
+    ):
         pv_status = pv.get("status", "unknown").upper()
         all_tool_results.append({
             "tool_name": "npi_verification",
@@ -943,11 +1301,9 @@ async def _run_review_pipeline(
     })
 
     # Normalize legacy recommendation values from synthesis agent
-    recommendation = synthesis.get("recommendation", "needs_review")
-    if recommendation == "approve":
-        recommendation = "ready_to_submit"
-    elif recommendation == "pend_for_review":
-        recommendation = "needs_review"
+    recommendation = _normalize_recommendation_value(
+        synthesis.get("recommendation", "needs_review")
+    )
     synthesis["recommendation"] = recommendation
 
     return {
