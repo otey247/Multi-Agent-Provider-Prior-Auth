@@ -19,6 +19,7 @@ class Settings:
     # On Azure (azd up), Bicep injects AZURE_AI_PROJECT_ENDPOINT and the 4 agent
     # name vars automatically. The backend calls agents via the Foundry Responses
     # API with agent_reference routing; no direct agent URLs are used.
+    AI_FOUNDRY_PROJECT_ENDPOINT: str = os.getenv("AI_FOUNDRY_PROJECT_ENDPOINT", "")
     AZURE_AI_PROJECT_ENDPOINT: str = os.getenv("AZURE_AI_PROJECT_ENDPOINT", "")
     HOSTED_AGENT_CLINICAL_NAME: str = os.getenv(
         "HOSTED_AGENT_CLINICAL_NAME", "clinical-reviewer-agent"
@@ -47,6 +48,19 @@ class Settings:
     APPLICATION_INSIGHTS_CONNECTION_STRING: str = os.getenv(
         "APPLICATION_INSIGHTS_CONNECTION_STRING", ""
     )
+
+    @property
+    def foundry_project_endpoint(self) -> str:
+        endpoint = (
+            self.AI_FOUNDRY_PROJECT_ENDPOINT
+            or self.AZURE_AI_PROJECT_ENDPOINT
+            or ""
+        ).rstrip("/")
+
+        return endpoint.replace(
+            ".cognitiveservices.azure.com",
+            ".services.ai.azure.com",
+        )
 
 
 settings = Settings()

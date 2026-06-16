@@ -102,12 +102,14 @@ hooks:
           $ErrorActionPreference = 'Continue'
           if ($userOid) {
             $roles = az role assignment list --assignee $userOid --subscription $subId --query "[].roleDefinitionName" -o tsv 2>$null
-            if ($roles -match "Owner|Contributor") {
-              Write-Host "   [OK] Sufficient permissions (Contributor or Owner)" -ForegroundColor Green
+            if ($roles -match "Owner|User Access Administrator|Role Based Access Control Administrator") {
+              Write-Host "   [OK] Sufficient permissions for role assignments" -ForegroundColor Green
+            } elseif ($roles -match "Contributor") {
+              Write-Host "   [!!] Contributor detected, but role assignment requires Owner, User Access Administrator, or Role Based Access Control Administrator" -ForegroundColor Yellow
+              Write-Host "   Deployment may still fail during role assignment steps." -ForegroundColor Yellow
             } else {
-              Write-Host "   [!!] WARNING: No Contributor/Owner role detected" -ForegroundColor Yellow
+              Write-Host "   [!!] Required: Contributor plus role assignment rights" -ForegroundColor Yellow
               Write-Host "   You may encounter permission errors during deployment." -ForegroundColor Yellow
-              Write-Host "   Required: Contributor + User Access Administrator" -ForegroundColor Gray
               $hasErrors = $false  # warning only, don't block
             }
           } else {
@@ -306,7 +308,7 @@ hooks:
           Write-Host "   - Agent: Synthesis Decision (MAF Hosted Agent)" -ForegroundColor White
           Write-Host "   - Frontend Container App (Next.js/nginx)" -ForegroundColor White
           Write-Host "   - Log Analytics + Application Insights" -ForegroundColor White
-          Write-Host "   - Role Assignments (Cognitive Services OpenAI User + OpenAI Contributor, AcrPull, Azure AI User)" -ForegroundColor White
+          Write-Host "   - Role Assignments (Cognitive Services OpenAI User + OpenAI Contributor, AcrPull, Foundry User)" -ForegroundColor White
           Write-Host ""
           Write-Host "===============================================================" -ForegroundColor Yellow
 
@@ -421,12 +423,14 @@ hooks:
           USER_OID=$(az ad signed-in-user show --query "id" -o tsv 2>/dev/null || true)
           if [ -n "$USER_OID" ]; then
             ROLES=$(az role assignment list --assignee "$USER_OID" --subscription "$SUB_ID" --query "[].roleDefinitionName" -o tsv 2>/dev/null || true)
-            if echo "$ROLES" | grep -qE "Owner|Contributor"; then
-              printf "${Green}   [OK] Sufficient permissions (Contributor or Owner)${NC}\n"
+            if echo "$ROLES" | grep -qE "Owner|User Access Administrator|Role Based Access Control Administrator"; then
+              printf "${Green}   [OK] Sufficient permissions for role assignments${NC}\n"
+            elif echo "$ROLES" | grep -qE "Contributor"; then
+              printf "${Yellow}   [!!] Contributor detected, but role assignment requires Owner, User Access Administrator, or Role Based Access Control Administrator${NC}\n"
+              printf "${Yellow}   Deployment may still fail during role assignment steps.${NC}\n"
             else
-              printf "${Yellow}   [!!] WARNING: No Contributor/Owner role detected${NC}\n"
+              printf "${Yellow}   [!!] Required: Contributor plus role assignment rights${NC}\n"
               printf "${Yellow}   You may encounter permission errors during deployment.${NC}\n"
-              printf "${Gray}   Required: Contributor + User Access Administrator${NC}\n"
             fi
           else
             printf "${Gray}   [--] Skipped (service principal or managed identity)${NC}\n"
@@ -588,7 +592,7 @@ hooks:
           printf "   • Agent: Synthesis Decision (MAF Hosted Agent)\n"
           printf "   • Frontend Container App (Next.js/nginx)\n"
           printf "   • Log Analytics + Application Insights\n"
-          printf "   • Role Assignments (Cognitive Services OpenAI User + OpenAI Contributor, AcrPull, Azure AI User)\n"
+          printf "   • Role Assignments (Cognitive Services OpenAI User + OpenAI Contributor, AcrPull, Foundry User)\n"
           printf "\n${Yellow}===============================================================${NC}\n"
 
           # Ask for confirmation
@@ -618,9 +622,12 @@ hooks:
         $rgName           = azd env get-value AZURE_RESOURCE_GROUP
         $backendApp       = azd env get-value BACKEND_CONTAINER_APP_NAME
         $frontendApp      = azd env get-value FRONTEND_CONTAINER_APP_NAME
-        $foundryAccountName = azd env get-value AI_FOUNDRY_ACCOUNT_NAME
-        $foundryProjectName = azd env get-value AI_FOUNDRY_PROJECT_NAME
-        $projectEndpoint    = azd env get-value AI_FOUNDRY_PROJECT_ENDPOINT
+        $foundryAccountName = (azd env get-value AI_FOUNDRY_ACCOUNT_NAME).Trim('"')
+        $foundryProjectName = (azd env get-value AI_FOUNDRY_PROJECT_NAME).Trim('"')
+        $projectEndpoint = "https://$foundryAccountName.services.ai.azure.com/api/projects/$foundryProjectName"
+
+        azd env set AI_FOUNDRY_PROJECT_ENDPOINT $projectEndpoint | Out-Null
+        azd env set AZURE_AI_PROJECT_ENDPOINT $projectEndpoint | Out-Null
 
         # Use a unique tag per build so ACA always pulls the fresh image
         $imageTag = Get-Date -Format 'yyyyMMddHHmmss'
@@ -683,28 +690,81 @@ hooks:
         $ErrorActionPreference = 'Continue'
         Write-Host "  Backend and frontend container apps updated" -ForegroundColor Green
 
-        # Ensure the deployer has "Azure AI User" on the Foundry account + project.
-        # The account-level role is required by the Foundry portal; the project-level
-        # role is required for AIServices data actions.
-        # az role assignment create is idempotent — no error if it already exists.
-        Write-Host "  Ensuring deployer has Azure AI User role..." -ForegroundColor White
+        # Ensure the deployer and backend managed identity have Foundry User on the
+        # Foundry account + project. Use role ID because Azure AI User / Foundry User
+        # naming is currently in transition.
+        $foundryUserRoleId = "53ca6127-db72-4b80-b1b0-d745d6d5456d"
+
+        Write-Host "  Ensuring deployer has Foundry User role..." -ForegroundColor White
+
         $deployerOid = az ad signed-in-user show --query id -o tsv 2>$null
         $subId = azd env get-value AZURE_SUBSCRIPTION_ID 2>$null
+        if (-not $subId -or $subId -match "ERROR") { $subId = az account show --query id -o tsv }
+
         $accountScope = "/subscriptions/$subId/resourceGroups/$rgName/providers/Microsoft.CognitiveServices/accounts/$foundryAccountName"
         $projectScope = "$accountScope/projects/$foundryProjectName"
-        $existing = az role assignment list --assignee $deployerOid --role "Azure AI User" --scope $projectScope --query "[].id" -o tsv 2>$null
-        az role assignment create --assignee $deployerOid --role "Azure AI User" --scope $accountScope --only-show-errors 2>$null | Out-Null
-        az role assignment create --assignee $deployerOid --role "Azure AI User" --scope $projectScope --only-show-errors 2>$null | Out-Null
-        $roleIsNew = -not $existing
-        Write-Host "  Azure AI User role ensured (deployer)" -ForegroundColor Green
 
-        # Also assign Azure AI User to the Backend ACA managed identity so it can
-        # call Foundry Hosted Agents at runtime via DefaultAzureCredential.
-        Write-Host "  Ensuring backend managed identity has Azure AI User role..." -ForegroundColor White
+        if (-not $deployerOid) {
+            Write-Host "  ERROR: Could not resolve signed-in user's object ID." -ForegroundColor Red
+            Write-Host "  Run: az login --tenant <tenant-id>" -ForegroundColor Yellow
+            exit 1
+        }
+
+        function Assign-FoundryUserRole {
+            param(
+                [string]$PrincipalOid,
+                [string]$PrincipalType,
+                [string]$Scope,
+                [string]$Label
+            )
+
+            $existingAssignment = az role assignment list `
+              --assignee-object-id $PrincipalOid `
+              --role $foundryUserRoleId `
+              --scope $Scope `
+              --query "[].id" `
+              -o tsv 2>$null
+
+            if ($existingAssignment) { return }
+
+            $roleErr = az role assignment create `
+              --assignee-object-id $PrincipalOid `
+              --assignee-principal-type $PrincipalType `
+              --role $foundryUserRoleId `
+              --scope $Scope `
+              --only-show-errors 2>&1 | Out-String
+
+            if ($LASTEXITCODE -ne 0) {
+                if ($roleErr -match "RoleAssignmentExists") { return }
+
+                Write-Host "  ERROR: Could not assign Foundry User role to $Label." -ForegroundColor Red
+                Write-Host "  Scope: $Scope" -ForegroundColor Yellow
+                Write-Host "  Azure said: $roleErr" -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "  You likely need Owner, User Access Administrator, or Role Based Access Control Administrator." -ForegroundColor White
+                exit 1
+            }
+        }
+
+        $existing = az role assignment list `
+          --assignee-object-id $deployerOid `
+          --role $foundryUserRoleId `
+          --scope $projectScope `
+          --query "[].id" `
+          -o tsv 2>$null
+
+        $roleIsNew = -not $existing
+
+        Assign-FoundryUserRole -PrincipalOid $deployerOid -PrincipalType "User" -Scope $accountScope -Label "deployer on Foundry account"
+        Assign-FoundryUserRole -PrincipalOid $deployerOid -PrincipalType "User" -Scope $projectScope -Label "deployer on Foundry project"
+
+        Write-Host "  Foundry User role ensured (deployer)" -ForegroundColor Green
+
+        Write-Host "  Ensuring backend managed identity has Foundry User role..." -ForegroundColor White
         $backendMiOid = az containerapp identity show --name $backendApp --resource-group $rgName --query "principalId" -o tsv 2>$null
-        if ($backendMiOid) {
-            az role assignment create --assignee-object-id $backendMiOid --assignee-principal-type ServicePrincipal --role "Azure AI User" --scope $accountScope --only-show-errors 2>$null | Out-Null
-            az role assignment create --assignee-object-id $backendMiOid --assignee-principal-type ServicePrincipal --role "Azure AI User" --scope $projectScope --only-show-errors 2>$null | Out-Null
+        if ($backendMiOid -and $backendMiOid -ne "null") {
+            Assign-FoundryUserRole -PrincipalOid $backendMiOid -PrincipalType "ServicePrincipal" -Scope $accountScope -Label "backend managed identity on Foundry account"
+            Assign-FoundryUserRole -PrincipalOid $backendMiOid -PrincipalType "ServicePrincipal" -Scope $projectScope -Label "backend managed identity on Foundry project"
             Write-Host "  Backend managed identity role ensured" -ForegroundColor Green
         } else {
             Write-Host "  WARN: Could not retrieve backend managed identity" -ForegroundColor Yellow
@@ -804,9 +864,12 @@ hooks:
         RG_NAME=$(azd env get-value AZURE_RESOURCE_GROUP)
         BACKEND_APP=$(azd env get-value BACKEND_CONTAINER_APP_NAME)
         FRONTEND_APP=$(azd env get-value FRONTEND_CONTAINER_APP_NAME)
-        FOUNDRY_ACCOUNT_NAME=$(azd env get-value AI_FOUNDRY_ACCOUNT_NAME)
-        FOUNDRY_PROJECT_NAME=$(azd env get-value AI_FOUNDRY_PROJECT_NAME)
-        PROJECT_ENDPOINT=$(azd env get-value AI_FOUNDRY_PROJECT_ENDPOINT)
+        FOUNDRY_ACCOUNT_NAME=$(azd env get-value AI_FOUNDRY_ACCOUNT_NAME | tr -d '"\r')
+        FOUNDRY_PROJECT_NAME=$(azd env get-value AI_FOUNDRY_PROJECT_NAME | tr -d '"\r')
+        PROJECT_ENDPOINT="https://${FOUNDRY_ACCOUNT_NAME}.services.ai.azure.com/api/projects/${FOUNDRY_PROJECT_NAME}"
+
+        azd env set AI_FOUNDRY_PROJECT_ENDPOINT "$PROJECT_ENDPOINT" >/dev/null
+        azd env set AZURE_AI_PROJECT_ENDPOINT "$PROJECT_ENDPOINT" >/dev/null
 
         # Use a unique tag per build so ACA always pulls the fresh image
         IMAGE_TAG=$(date -u +%Y%m%d%H%M%S)
@@ -847,29 +910,85 @@ hooks:
         az containerapp update --name "$FRONTEND_APP" --resource-group "$RG_NAME" --image "$ACR_ENDPOINT/frontend:$IMAGE_TAG" --output none 2>/dev/null
         printf "${Green}  Backend and frontend container apps updated${NC}\n"
 
-        # Ensure the deployer has "Azure AI User" on the Foundry account + project.
-        # The account-level role is required by the Foundry portal; the project-level
-        # role is required for AIServices data actions.
-        # az role assignment create is idempotent — no error if it already exists.
-        printf "${White}  Ensuring deployer has Azure AI User role...${NC}\n"
-        DEPLOYER_OID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null)
-        SUB_ID=$(azd env get-value AZURE_SUBSCRIPTION_ID 2>/dev/null)
+        # Ensure the deployer and backend managed identity have Foundry User on the
+        # Foundry account + project. Use role ID because Azure AI User / Foundry User
+        # naming is currently in transition.
+        FOUNDRY_USER_ROLE_ID="53ca6127-db72-4b80-b1b0-d745d6d5456d"
+
+        printf "${White}  Ensuring deployer has Foundry User role...${NC}\n"
+
+        DEPLOYER_OID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
+        SUB_ID=$(azd env get-value AZURE_SUBSCRIPTION_ID 2>/dev/null || az account show --query id -o tsv)
+
         ACCOUNT_SCOPE="/subscriptions/$SUB_ID/resourceGroups/$RG_NAME/providers/Microsoft.CognitiveServices/accounts/$FOUNDRY_ACCOUNT_NAME"
         PROJECT_SCOPE="$ACCOUNT_SCOPE/projects/$FOUNDRY_PROJECT_NAME"
-        EXISTING=$(az role assignment list --assignee "$DEPLOYER_OID" --role "Azure AI User" --scope "$PROJECT_SCOPE" --query "[].id" -o tsv 2>/dev/null)
-        az role assignment create --assignee "$DEPLOYER_OID" --role "Azure AI User" --scope "$ACCOUNT_SCOPE" --only-show-errors > /dev/null 2>/dev/null || true
-        az role assignment create --assignee "$DEPLOYER_OID" --role "Azure AI User" --scope "$PROJECT_SCOPE" --only-show-errors > /dev/null 2>/dev/null || true
-        ROLE_IS_NEW=false
-        [ -z "$EXISTING" ] && ROLE_IS_NEW=true
-        printf "${Green}  Azure AI User role ensured (deployer)${NC}\n"
 
-        # Also assign Azure AI User to the Backend ACA managed identity so it can
-        # call Foundry Hosted Agents at runtime via DefaultAzureCredential.
-        printf "${White}  Ensuring backend managed identity has Azure AI User role...${NC}\n"
-        BACKEND_MI_OID=$(az containerapp identity show --name "$BACKEND_APP" --resource-group "$RG_NAME" --query "principalId" -o tsv 2>/dev/null)
-        if [ -n "$BACKEND_MI_OID" ]; then
-            az role assignment create --assignee-object-id "$BACKEND_MI_OID" --assignee-principal-type ServicePrincipal --role "Azure AI User" --scope "$ACCOUNT_SCOPE" --only-show-errors > /dev/null 2>/dev/null || true
-            az role assignment create --assignee-object-id "$BACKEND_MI_OID" --assignee-principal-type ServicePrincipal --role "Azure AI User" --scope "$PROJECT_SCOPE" --only-show-errors > /dev/null 2>/dev/null || true
+        if [ -z "$DEPLOYER_OID" ]; then
+            printf "${Red}  ERROR: Could not resolve signed-in user's object ID.${NC}\n"
+            printf "${Yellow}  Run: az login --tenant <tenant-id>${NC}\n"
+            exit 1
+        fi
+
+        assign_foundry_user_role() {
+            PRINCIPAL_OID="$1"
+            PRINCIPAL_TYPE="$2"
+            SCOPE="$3"
+            LABEL="$4"
+
+            EXISTING_ASSIGNMENT=$(az role assignment list \
+              --assignee-object-id "$PRINCIPAL_OID" \
+              --role "$FOUNDRY_USER_ROLE_ID" \
+              --scope "$SCOPE" \
+              --query "[].id" \
+              -o tsv 2>/dev/null || true)
+
+            if [ -n "$EXISTING_ASSIGNMENT" ]; then
+                return 0
+            fi
+
+            ROLE_ERR=$(az role assignment create \
+              --assignee-object-id "$PRINCIPAL_OID" \
+              --assignee-principal-type "$PRINCIPAL_TYPE" \
+              --role "$FOUNDRY_USER_ROLE_ID" \
+              --scope "$SCOPE" \
+              --only-show-errors 2>&1 >/dev/null) || {
+                if echo "$ROLE_ERR" | grep -qi "RoleAssignmentExists"; then
+                    return 0
+                fi
+
+                printf "${Red}  ERROR: Could not assign Foundry User role to %s.${NC}\n" "$LABEL"
+                printf "${Yellow}  Scope: %s${NC}\n" "$SCOPE"
+                printf "${Yellow}  Azure said: %s${NC}\n" "$ROLE_ERR"
+                printf "\n${White}  You likely need Owner, User Access Administrator, or Role Based Access Control Administrator.${NC}\n"
+                exit 1
+            }
+        }
+
+        ROLE_IS_NEW=false
+        EXISTING=$(az role assignment list \
+          --assignee-object-id "$DEPLOYER_OID" \
+          --role "$FOUNDRY_USER_ROLE_ID" \
+          --scope "$PROJECT_SCOPE" \
+          --query "[].id" \
+          -o tsv 2>/dev/null || true)
+
+        [ -z "$EXISTING" ] && ROLE_IS_NEW=true
+
+        assign_foundry_user_role "$DEPLOYER_OID" "User" "$ACCOUNT_SCOPE" "deployer on Foundry account"
+        assign_foundry_user_role "$DEPLOYER_OID" "User" "$PROJECT_SCOPE" "deployer on Foundry project"
+
+        printf "${Green}  Foundry User role ensured (deployer)${NC}\n"
+
+        printf "${White}  Ensuring backend managed identity has Foundry User role...${NC}\n"
+        BACKEND_MI_OID=$(az containerapp identity show \
+          --name "$BACKEND_APP" \
+          --resource-group "$RG_NAME" \
+          --query "principalId" \
+          -o tsv 2>/dev/null || true)
+
+        if [ -n "$BACKEND_MI_OID" ] && [ "$BACKEND_MI_OID" != "null" ]; then
+            assign_foundry_user_role "$BACKEND_MI_OID" "ServicePrincipal" "$ACCOUNT_SCOPE" "backend managed identity on Foundry account"
+            assign_foundry_user_role "$BACKEND_MI_OID" "ServicePrincipal" "$PROJECT_SCOPE" "backend managed identity on Foundry project"
             printf "${Green}  Backend managed identity role ensured${NC}\n"
         else
             printf "${Yellow}  WARN: Could not retrieve backend managed identity${NC}\n"
@@ -886,6 +1005,7 @@ hooks:
         case "$DEPLOYMENT_NAME" in *ERROR*|"" ) DEPLOYMENT_NAME="gpt-5.4" ;; esac
         APP_INSIGHTS_CS=$(azd env get-value APPLICATION_INSIGHTS_CONNECTION_STRING 2>/dev/null || true)
         case "$APP_INSIGHTS_CS" in *ERROR* ) APP_INSIGHTS_CS="" ;; esac
+        export AI_FOUNDRY_PROJECT_ENDPOINT="$PROJECT_ENDPOINT"
         export AZURE_AI_PROJECT_ENDPOINT="$PROJECT_ENDPOINT"
         export AZURE_CONTAINER_REGISTRY_ENDPOINT="$ACR_ENDPOINT"
         export AI_FOUNDRY_ACCOUNT_NAME="$FOUNDRY_ACCOUNT_NAME"

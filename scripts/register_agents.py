@@ -13,7 +13,8 @@ Requirements:
   pip install "azure-ai-projects>=2.0.0"
 
 Required environment variables (set automatically by the postprovision hook):
-  AZURE_AI_PROJECT_ENDPOINT          — Foundry project endpoint
+  AI_FOUNDRY_PROJECT_ENDPOINT        — Preferred Foundry project endpoint
+  AZURE_AI_PROJECT_ENDPOINT          — Legacy fallback Foundry project endpoint
   AZURE_CONTAINER_REGISTRY_ENDPOINT  — ACR login server (e.g. myacr.azurecr.io)
   AI_FOUNDRY_ACCOUNT_NAME            — Foundry account name
   AI_FOUNDRY_PROJECT_NAME            — Foundry project name
@@ -22,13 +23,81 @@ Required environment variables (set automatically by the postprovision hook):
   AZURE_RESOURCE_GROUP               — Resource group name
 
 Optional environment variables:
-  APPLICATION_INSIGHTS_CONNECTION_STRING — For agent observability (passed to agents)
+  APPLICATION_INSIGHTS_CONNECTION_STRING — Logged by this script if present; not passed
+                                           to Hosted Agents because the platform
+                                           reserves App Insights env names.
   IMAGE_TAG                             — ACR image tag (default: latest)
 """
 
 import os
 import subprocess
 import sys
+
+
+# ---------------------------------------------------------------------------
+# Hosted Agent environment variable safety
+# ---------------------------------------------------------------------------
+# Azure Foundry Hosted Agents reserve several environment variable names for
+# platform use. Passing these in HostedAgentDefinition.environment_variables
+# causes registration to fail with invalid_payload. Keep this sanitizer even
+# if the agent env dictionaries below are already clean, so future additions
+# do not reintroduce the issue.
+# ---------------------------------------------------------------------------
+RESERVED_ENV_EXACT = {
+    "APPLICATIONINSIGHTS_CONNECTION_STRING",
+    "APPLICATION_INSIGHTS_CONNECTION_STRING",
+}
+
+RESERVED_ENV_PREFIXES = (
+    "FOUNDRY_",
+    "AGENT_",
+)
+
+
+def sanitize_hosted_agent_env(env: dict[str, str]) -> dict[str, str]:
+    """Remove env vars that Foundry Hosted Agents reserve for platform use."""
+    sanitized: dict[str, str] = {}
+
+    for key, value in env.items():
+        if key in RESERVED_ENV_EXACT or key.startswith(RESERVED_ENV_PREFIXES):
+            print(f"    [skip reserved env] {key}")
+            continue
+
+        sanitized[key] = value
+
+    return sanitized
+
+
+def _clean_env_value(value: str) -> str:
+    """Normalize values coming from azd env or shell exports."""
+    return (value or "").strip().strip('"').strip().rstrip("/")
+
+
+def _normalize_project_endpoint(
+    endpoint: str,
+    account_name: str,
+    project_name: str,
+) -> str:
+    """Return the hosted-agent-compatible Foundry project endpoint.
+
+    AI_FOUNDRY_PROJECT_ENDPOINT is the preferred variable name. Some older
+    infrastructure outputs still use the cognitiveservices host, but hosted
+    agent runtime calls require the services.ai.azure.com project endpoint.
+    """
+    normalized = _clean_env_value(endpoint)
+
+    if not normalized and account_name and project_name:
+        normalized = (
+            f"https://{account_name}.services.ai.azure.com"
+            f"/api/projects/{project_name}"
+        )
+
+    normalized = normalized.replace(
+        ".cognitiveservices.azure.com",
+        ".services.ai.azure.com",
+    )
+
+    return normalized.rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +183,6 @@ def _create_mcp_connections(
     for mcp in MCP_CONNECTIONS:
         url = f"{base_url}/connections/{mcp['name']}?api-version={api_version}"
 
-        # Build the connection body matching the Foundry portal format:
-        # category=RemoteTool + metadata.type=custom_MCP makes it visible
-        # in the portal's Tools page as a configured MCP tool.
         body: dict = {
             "properties": {
                 "category": "RemoteTool",
@@ -126,8 +192,6 @@ def _create_mcp_connections(
             }
         }
 
-        # Add credentials only for Key-based auth (DeepSense servers need
-        # the User-Agent header; PubMed works unauthenticated)
         if mcp["auth"] == "CustomKeys" and mcp["keys"]:
             body["properties"]["credentials"] = {"keys": mcp["keys"]}
 
@@ -142,33 +206,48 @@ def _create_mcp_connections(
 
 
 def run() -> None:
-    project_endpoint = os.environ.get("AZURE_AI_PROJECT_ENDPOINT", "").rstrip("/")
-    acr_endpoint = os.environ.get("AZURE_CONTAINER_REGISTRY_ENDPOINT", "").rstrip("/")
-    account_name = os.environ.get("AI_FOUNDRY_ACCOUNT_NAME", "")
-    project_name = os.environ.get("AI_FOUNDRY_PROJECT_NAME", "")
-    model_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-5.4")
-    app_insights_cs = os.environ.get("APPLICATION_INSIGHTS_CONNECTION_STRING", "")
-    image_tag = os.environ.get("IMAGE_TAG", "latest")
-    subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
-    resource_group = os.environ.get("AZURE_RESOURCE_GROUP", "")
+    account_name = _clean_env_value(os.environ.get("AI_FOUNDRY_ACCOUNT_NAME", ""))
+    project_name = _clean_env_value(os.environ.get("AI_FOUNDRY_PROJECT_NAME", ""))
 
-    # When using 'latest' tag, Foundry may not re-pull the image for an existing
-    # version because the image reference hasn't changed. The azd up hook always
-    # sets IMAGE_TAG to a timestamp (YYYYMMDDHHmmss) which avoids this issue.
-    # For manual runs without IMAGE_TAG set, warn the user.
+    project_endpoint = _normalize_project_endpoint(
+        os.environ.get("AI_FOUNDRY_PROJECT_ENDPOINT", "")
+        or os.environ.get("AZURE_AI_PROJECT_ENDPOINT", ""),
+        account_name,
+        project_name,
+    )
+
+    acr_endpoint = _clean_env_value(os.environ.get("AZURE_CONTAINER_REGISTRY_ENDPOINT", ""))
+    model_name = _clean_env_value(os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-5.4"))
+    app_insights_cs = os.environ.get("APPLICATION_INSIGHTS_CONNECTION_STRING", "")
+    image_tag = _clean_env_value(os.environ.get("IMAGE_TAG", "latest"))
+    subscription_id = _clean_env_value(os.environ.get("AZURE_SUBSCRIPTION_ID", ""))
+    resource_group = _clean_env_value(os.environ.get("AZURE_RESOURCE_GROUP", ""))
+
     if image_tag == "latest":
         print("  WARNING: IMAGE_TAG=latest — Foundry may not re-pull updated images.")
         print("  For reliable deploys, set IMAGE_TAG to a unique value:")
         print("    export IMAGE_TAG=$(date -u +%Y%m%d%H%M%S)")
 
     if app_insights_cs:
-        print(f"  App Insights: connection string set (len={len(app_insights_cs)})")
+        print(
+            f"  App Insights: connection string available to deployment hook "
+            f"(len={len(app_insights_cs)}); not passing it to Hosted Agents"
+        )
     else:
-        print("  App Insights: CONNECTION STRING NOT SET — agent observability will be disabled")
+        print(
+            "  App Insights: connection string not set in hook environment. "
+            "Hosted Agent platform telemetry env vars will still be injected if configured."
+        )
 
     if not project_endpoint:
-        print("ERROR: AZURE_AI_PROJECT_ENDPOINT is not set.", file=sys.stderr)
+        print(
+            "ERROR: AI_FOUNDRY_PROJECT_ENDPOINT is not set and could not be derived "
+            "from AI_FOUNDRY_ACCOUNT_NAME + AI_FOUNDRY_PROJECT_NAME.",
+            file=sys.stderr,
+        )
         sys.exit(1)
+
+    print(f"  Foundry project endpoint: {project_endpoint}")
     if not acr_endpoint:
         print("ERROR: AZURE_CONTAINER_REGISTRY_ENDPOINT is not set.", file=sys.stderr)
         sys.exit(1)
@@ -179,18 +258,31 @@ def run() -> None:
         )
         sys.exit(1)
 
-    # Validate that all agent images exist in ACR before registering
     acr_name = acr_endpoint.replace(".azurecr.io", "")
     agent_images = ["agent-clinical", "agent-coverage", "agent-compliance", "agent-synthesis"]
     missing_images = []
     for img in agent_images:
         result = subprocess.run(
-            ["az", "acr", "repository", "show-tags", "--name", acr_name,
-             "--repository", img, "--query", f"[?@=='{image_tag}']", "-o", "tsv"],
-            capture_output=True, text=True,
+            [
+                "az",
+                "acr",
+                "repository",
+                "show-tags",
+                "--name",
+                acr_name,
+                "--repository",
+                img,
+                "--query",
+                f"[?@=='{image_tag}']",
+                "-o",
+                "tsv",
+            ],
+            capture_output=True,
+            text=True,
         )
         if not result.stdout.strip():
             missing_images.append(f"{img}:{image_tag}")
+
     if missing_images:
         print(
             f"ERROR: The following images are missing from ACR ({acr_name}):\n"
@@ -209,6 +301,7 @@ def run() -> None:
         from azure.ai.projects import AIProjectClient
         from azure.ai.projects.models import (
             AgentProtocol,
+            ContainerConfiguration,
             HostedAgentDefinition,
             ProtocolVersionRecord,
         )
@@ -222,7 +315,6 @@ def run() -> None:
         )
         sys.exit(1)
 
-    # --- Step 1: Create Foundry MCP tool connections (idempotent) ---
     if subscription_id and resource_group:
         _create_mcp_connections(subscription_id, resource_group, account_name, project_name)
     else:
@@ -231,11 +323,9 @@ def run() -> None:
             "skipping MCP connection creation"
         )
 
-    # --- Step 2: Register agents ---
-    # The HostedAgents=V1Preview feature flag is required to attach MCPTool
-    # definitions to HostedAgentDefinition (tools on hosted agents is preview).
     class _FoundryPreviewPolicy(CustomHookPolicy):
         """Injects the Foundry preview feature header into every request."""
+
         def on_request(self, request):
             request.http_request.headers["Foundry-Features"] = "HostedAgents=V1Preview"
 
@@ -246,29 +336,11 @@ def run() -> None:
         per_call_policies=[_FoundryPreviewPolicy()],
     )
 
-    # MCP URLs passed to agent containers (agents wire MCPStreamableHTTPTool internally)
     mcp_icd10 = "https://mcp.deepsense.ai/icd10_codes/mcp"
     mcp_pubmed = "https://pubmed.mcp.claude.com/mcp"
     mcp_trials = "https://mcp.deepsense.ai/clinical_trials/mcp"
     mcp_npi = "https://mcp.deepsense.ai/npi_registry/mcp"
     mcp_cms = "https://mcp.deepsense.ai/cms_coverage/mcp"
-
-    # Foundry MCPTool definitions are DISABLED — passing MCPTool definitions in
-    # HostedAgentDefinition.tools causes the agentserver adapter to inject a
-    # UserInfoContextMiddleware that calls /agents/{name}/tools/resolve. This API
-    # is not yet available in all Foundry regions (returns 404), which crashes
-    # the ASGI pipeline with "No response returned". MCP tools are handled
-    # directly by MCPStreamableHTTPTool in each agent's main.py instead.
-    # Re-enable when the tools/resolve API is GA in your Foundry region.
-    # clinical_tools = [
-    #     MCPTool(server_label="icd10", ...),
-    #     MCPTool(server_label="pubmed", ...),
-    #     MCPTool(server_label="clinical-trials", ...),
-    # ]
-    # coverage_tools = [
-    #     MCPTool(server_label="npi-registry", ...),
-    #     MCPTool(server_label="cms-coverage", ...),
-    # ]
 
     agents = [
         {
@@ -282,15 +354,14 @@ def run() -> None:
             "cpu": "1",
             "memory": "2Gi",
             "env": {
+                "AI_FOUNDRY_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": model_name,
                 "MCP_ICD10_CODES": mcp_icd10,
                 "MCP_PUBMED": mcp_pubmed,
                 "MCP_CLINICAL_TRIALS": mcp_trials,
-                "APPLICATION_INSIGHTS_CONNECTION_STRING": app_insights_cs,
-                "APPLICATIONINSIGHTS_CONNECTION_STRING": app_insights_cs,
             },
-            "tools": [],  # MCPTool defs disabled (see comment above)
+            "tools": [],
         },
         {
             "name": "coverage-assessment-agent",
@@ -303,14 +374,13 @@ def run() -> None:
             "cpu": "1",
             "memory": "2Gi",
             "env": {
+                "AI_FOUNDRY_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": model_name,
                 "MCP_NPI_REGISTRY": mcp_npi,
                 "MCP_CMS_COVERAGE": mcp_cms,
-                "APPLICATION_INSIGHTS_CONNECTION_STRING": app_insights_cs,
-                "APPLICATIONINSIGHTS_CONNECTION_STRING": app_insights_cs,
             },
-            "tools": [],  # MCPTool defs disabled (see comment above)
+            "tools": [],
         },
         {
             "name": "compliance-agent",
@@ -324,12 +394,11 @@ def run() -> None:
             "cpu": "0.5",
             "memory": "1Gi",
             "env": {
+                "AI_FOUNDRY_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": os.environ.get(
                     "AZURE_OPENAI_COMPLIANCE_DEPLOYMENT_NAME", "gpt-5.4"
                 ),
-                "APPLICATION_INSIGHTS_CONNECTION_STRING": app_insights_cs,
-                "APPLICATIONINSIGHTS_CONNECTION_STRING": app_insights_cs,
             },
             "tools": [],
         },
@@ -345,10 +414,9 @@ def run() -> None:
             "cpu": "1",
             "memory": "2Gi",
             "env": {
+                "AI_FOUNDRY_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": model_name,
-                "APPLICATION_INSIGHTS_CONNECTION_STRING": app_insights_cs,
-                "APPLICATIONINSIGHTS_CONNECTION_STRING": app_insights_cs,
             },
             "tools": [],
         },
@@ -358,41 +426,57 @@ def run() -> None:
     for agent_def in agents:
         name = agent_def["name"]
         print(f"  Registering {name}...", end="", flush=True)
+
         try:
+            safe_env = sanitize_hosted_agent_env(agent_def["env"])
+
             agent_version = client.agents.create_version(
                 agent_name=name,
                 description=agent_def["description"],
                 definition=HostedAgentDefinition(
-                    container_protocol_versions=[
+                    protocol_versions=[
                         ProtocolVersionRecord(
-                            protocol=AgentProtocol.RESPONSES, version="v1"
+                            protocol=AgentProtocol.RESPONSES,
+                            version="1.0.0",
                         )
                     ],
                     cpu=agent_def["cpu"],
                     memory=agent_def["memory"],
-                    image=agent_def["image"],
-                    environment_variables=agent_def["env"],
+                    container_configuration=ContainerConfiguration(
+                        image=agent_def["image"],
+                    ),
+                    environment_variables=safe_env,
                     tools=agent_def["tools"],
                 ),
             )
+
             version_num = agent_version.version
             print(f" version {version_num} created")
+
         except Exception as exc:
             print(f" FAILED\nERROR: {exc}", file=sys.stderr)
             sys.exit(1)
 
-        # Start the new deployment via az CLI
         print(f"  Starting {name} (version {version_num})...", end="", flush=True)
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [
-                    "az", "cognitiveservices", "agent", "start",
-                    "--account-name", account_name,
-                    "--project-name", project_name,
-                    "--name", name,
-                    "--agent-version", str(version_num),
+                    "az",
+                    "cognitiveservices",
+                    "agent",
+                    "start",
+                    "--account-name",
+                    account_name,
+                    "--project-name",
+                    project_name,
+                    "--name",
+                    name,
+                    "--agent-version",
+                    str(version_num),
                 ],
-                check=True, capture_output=True, text=True,
+                check=True,
+                capture_output=True,
+                text=True,
             )
             print(" started")
         except subprocess.CalledProcessError as exc:
