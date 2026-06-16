@@ -162,7 +162,7 @@ def _agent_image(definition):
         ("container_configuration", "containerConfiguration"),
         "image",
     )
-    return image or "?"
+    return image or definition.get("image") or "?"
 
 
 def _short_image(image):
@@ -445,7 +445,18 @@ def _invoke_runtime_smoke(agent_name, endpoint, token):
             return False, f"HTTP {resp.status}: {raw[:500]}"
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
-        return False, f"HTTP {exc.code}: {raw[:1000]}"
+        details = []
+        for header in (
+            "x-platform-error-source",
+            "x-platform-error-detail",
+            "x-agent-session-id",
+        ):
+            value = exc.headers.get(header)
+            if value:
+                details.append(f"{header}={value[:300]}")
+        detail_text = f" ({'; '.join(details)})" if details else ""
+        body = raw[:1000] if raw else "(empty response body)"
+        return False, f"HTTP {exc.code}{detail_text}: {body}"
     except Exception as exc:
         return False, str(exc)
 

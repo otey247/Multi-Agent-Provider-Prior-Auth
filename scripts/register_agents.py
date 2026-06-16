@@ -157,6 +157,57 @@ def _run_agent_start_command(
     return False, "\n\n".join(failures)
 
 
+def _build_hosted_agent_definition(
+    *,
+    HostedAgentDefinition,
+    ProtocolVersionRecord,
+    AgentProtocol,
+    ContainerConfiguration,
+    agent_def: dict,
+):
+    """Build a HostedAgentDefinition across beta SDK model shapes.
+
+    azure-ai-projects 2.x exposes image-based hosted agents with direct
+    ``image`` and ``container_protocol_versions`` fields. Earlier preview
+    builds used ``container_configuration`` and ``protocol_versions``. Keep
+    both paths so deployment is not pinned to one transient beta spelling.
+    """
+    protocol_records = [
+        ProtocolVersionRecord(
+            protocol=AgentProtocol.RESPONSES,
+            version="1.0.0",
+        )
+    ]
+    common = {
+        "cpu": agent_def["cpu"],
+        "memory": agent_def["memory"],
+        "environment_variables": agent_def["safe_env"],
+        "tools": agent_def["tools"],
+    }
+
+    annotations = getattr(HostedAgentDefinition, "__annotations__", {}) or {}
+    if "container_protocol_versions" in annotations or "image" in annotations:
+        return HostedAgentDefinition(
+            container_protocol_versions=protocol_records,
+            image=agent_def["image"],
+            **common,
+        )
+
+    if ContainerConfiguration is None:
+        raise RuntimeError(
+            "Installed azure-ai-projects HostedAgentDefinition expects "
+            "ContainerConfiguration, but that model is not available."
+        )
+
+    return HostedAgentDefinition(
+        protocol_versions=protocol_records,
+        container_configuration=ContainerConfiguration(
+            image=agent_def["image"],
+        ),
+        **common,
+    )
+
+
 # ---------------------------------------------------------------------------
 # MCP tool connection definitions
 # ---------------------------------------------------------------------------
@@ -358,12 +409,15 @@ def run() -> None:
         from azure.ai.projects import AIProjectClient
         from azure.ai.projects.models import (
             AgentProtocol,
-            ContainerConfiguration,
             HostedAgentDefinition,
             ProtocolVersionRecord,
         )
         from azure.core.pipeline.policies import CustomHookPolicy
         from azure.identity import DefaultAzureCredential
+        try:
+            from azure.ai.projects.models import ContainerConfiguration
+        except ImportError:
+            ContainerConfiguration = None
     except ImportError:
         print(
             "ERROR: azure-ai-projects is not installed. Run:\n"
@@ -486,24 +540,17 @@ def run() -> None:
 
         try:
             safe_env = sanitize_hosted_agent_env(agent_def["env"])
+            agent_def["safe_env"] = safe_env
 
             agent_version = client.agents.create_version(
                 agent_name=name,
                 description=agent_def["description"],
-                definition=HostedAgentDefinition(
-                    protocol_versions=[
-                        ProtocolVersionRecord(
-                            protocol=AgentProtocol.RESPONSES,
-                            version="1.0.0",
-                        )
-                    ],
-                    cpu=agent_def["cpu"],
-                    memory=agent_def["memory"],
-                    container_configuration=ContainerConfiguration(
-                        image=agent_def["image"],
-                    ),
-                    environment_variables=safe_env,
-                    tools=agent_def["tools"],
+                definition=_build_hosted_agent_definition(
+                    HostedAgentDefinition=HostedAgentDefinition,
+                    ProtocolVersionRecord=ProtocolVersionRecord,
+                    AgentProtocol=AgentProtocol,
+                    ContainerConfiguration=ContainerConfiguration,
+                    agent_def=agent_def,
                 ),
             )
 
