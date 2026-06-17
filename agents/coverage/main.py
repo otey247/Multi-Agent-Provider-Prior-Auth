@@ -10,6 +10,8 @@ MCPTool connections registered for proxy routing (see scripts/register_agents.py
 Structured output enforced via default_options={"response_format": CoverageResult},
 which is passed through to every agent.run() call.
 """
+import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -198,61 +200,44 @@ def main() -> None:
         print("[observability] APPLICATION_INSIGHTS_CONNECTION_STRING not set — telemetry disabled")
     os.environ.setdefault("OTEL_SERVICE_NAME", "agent-coverage")
 
-    # --- MCP tool connections ---
-    # MCPStreamableHTTPTool wires tools into the agent container. Foundry also
-    # has MCPTool connections registered (see register_agents.py) for proxy routing.
-    npi_tool = _SafeMCPTool(
-        name="npi-registry",
-        description="Validate and look up provider NPI numbers from CMS NPPES",
-        url=os.environ["MCP_NPI_REGISTRY"],
-        http_client=_MCP_HTTP_CLIENT,
-        load_prompts=False,
-    )
-    cms_tool = _SafeMCPTool(
-        name="cms-coverage",
-        description="Search Medicare NCDs, LCDs and coverage policy documents",
-        url=os.environ["MCP_CMS_COVERAGE"],
-        http_client=_MCP_HTTP_CLIENT,
-        load_prompts=False,
-    )
-
-    # Drop MCP servers whose host is unreachable so the unguarded connect/
-    # list-tools phase inside agent.run() can't crash the request with a 500.
-    candidate_tools = [
-        (npi_tool, os.environ["MCP_NPI_REGISTRY"]),
-        (cms_tool, os.environ["MCP_CMS_COVERAGE"]),
+    # --- MCP tool specs ---
+    # Tool INSTANCES are created per request (see handler) so each MCP
+    # streamable-HTTP connection is opened and closed in the SAME asyncio task.
+    # Module-level singletons get connected/cleaned-up across tasks by the
+    # framework/GC, which raises anyio's "Attempted to exit cancel scope in a
+    # different task" (a BaseExceptionGroup) on teardown — harmless locally but
+    # fatal (HTTP 500) in the hosted agentserver.
+    mcp_specs = [
+        ("npi-registry", "Validate and look up provider NPI numbers from CMS NPPES",
+         os.environ["MCP_NPI_REGISTRY"], _SafeMCPTool),
+        ("cms-coverage", "Search Medicare NCDs, LCDs and coverage policy documents",
+         os.environ["MCP_CMS_COVERAGE"], _SafeMCPTool),
     ]
-    tools = []
-    for tool, url in candidate_tools:
+    # Drop unreachable MCP servers once at startup.
+    reachable_specs = []
+    for name, description, url, tool_cls in mcp_specs:
         if _host_reachable(url):
-            tools.append(tool)
+            reachable_specs.append((name, description, url, tool_cls))
         else:
-            print(f"[mcp] {tool.name} unreachable ({url}) — running without it")
+            print(f"[mcp] {name} unreachable ({url}) — running without it")
 
     # --- Skills from local directory ---
     skills_provider = SkillsProvider(
         skill_paths=str(Path(__file__).parent / "skills")
     )
 
-    # --- Agent using Responses API on Microsoft Foundry ---
-    # default_options enforces CoverageResult schema on every agent.run() call
-    # made by the Responses protocol handler — token-level JSON constraint, no fence parsing.
-    agent = AzureOpenAIResponsesClient(
+    # Reusable model client; the agent (with per-request tools) is built per request.
+    chat_client = AzureOpenAIResponsesClient(
         project_endpoint=os.environ["AZURE_AI_PROJECT_ENDPOINT"],
         deployment_name=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
         credential=DefaultAzureCredential(),
-    ).as_agent(
-        name="coverage-assessment-agent",
-        id="coverage-assessment-agent",  # Must match registered agent name for Foundry Traces correlation
-        instructions=(
-            "You are a Coverage Assessment Agent for prior authorization requests. "
-            "Use your coverage-assessment skill to verify provider credentials, search "
-            "coverage policies, and map clinical evidence to policy criteria with "
-            "MET/NOT_MET/INSUFFICIENT assessment and per-criterion confidence scoring."
-        ),
-        tools=tools,
-        context_providers=[skills_provider],
-        default_options={"response_format": CoverageResult},
+    )
+
+    _INSTRUCTIONS = (
+        "You are a Coverage Assessment Agent for prior authorization requests. "
+        "Use your coverage-assessment skill to verify provider credentials, search "
+        "coverage policies, and map clinical evidence to policy criteria with "
+        "MET/NOT_MET/INSUFFICIENT assessment and per-criterion confidence scoring."
     )
 
     # --- Serve as HTTP endpoint for Foundry hosting ---
@@ -267,8 +252,32 @@ def main() -> None:
     ):
         input_text = await _extract_input_text(request, context)
         try:
-            output_text = await _run_agent_for_responses(agent, input_text)
-        except Exception as exc:  # noqa: BLE001 — never surface a 500 to Foundry
+            # Connect MCP tools inside THIS request task and close them here too.
+            async with contextlib.AsyncExitStack() as stack:
+                tools = []
+                for name, description, url, tool_cls in reachable_specs:
+                    tool = tool_cls(
+                        name=name,
+                        description=description,
+                        url=url,
+                        http_client=_MCP_HTTP_CLIENT,
+                        load_prompts=False,
+                    )
+                    await stack.enter_async_context(tool)
+                    tools.append(tool)
+                # default_options enforces CoverageResult schema (token-level JSON).
+                agent = chat_client.as_agent(
+                    name="coverage-assessment-agent",
+                    id="coverage-assessment-agent",  # match registered name for Foundry Traces
+                    instructions=_INSTRUCTIONS,
+                    tools=tools,
+                    context_providers=[skills_provider],
+                    default_options={"response_format": CoverageResult},
+                )
+                output_text = await _run_agent_for_responses(agent, input_text)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001 — incl. anyio BaseExceptionGroup; never 500 to Foundry
             logger.exception("Coverage agent run failed; returning degraded fallback")
             output_text = _degraded_coverage_result(str(exc))
         return TextResponse(context, request, text=output_text)

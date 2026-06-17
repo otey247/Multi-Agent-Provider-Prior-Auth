@@ -10,6 +10,8 @@ MCPTool connections registered for proxy routing (see scripts/register_agents.py
 Structured output enforced via default_options={"response_format": ClinicalResult},
 which is passed through to every agent.run() call.
 """
+import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -218,69 +220,46 @@ def main() -> None:
         print("[observability] APPLICATION_INSIGHTS_CONNECTION_STRING not set — telemetry disabled")
     os.environ.setdefault("OTEL_SERVICE_NAME", "agent-clinical")
 
-    # --- MCP tool connections ---
-    # MCPStreamableHTTPTool wires tools into the agent container. Foundry also
-    # has MCPTool connections registered (see register_agents.py) for proxy routing.
-    icd10_tool = _SafeMCPTool(
-        name="icd10-codes",
-        description="Validate and look up ICD-10 diagnosis and procedure codes",
-        url=os.environ["MCP_ICD10_CODES"],
-        http_client=_MCP_HTTP_CLIENT,
-        load_prompts=False,
-    )
-    pubmed_tool = _ReconnectingMCPTool(
-        name="pubmed",
-        description="Search biomedical literature on PubMed",
-        url=os.environ["MCP_PUBMED"],
-        http_client=_MCP_HTTP_CLIENT,
-        load_prompts=False,
-    )
-    trials_tool = _SafeMCPTool(
-        name="clinical-trials",
-        description="Search ClinicalTrials.gov for relevant trials",
-        url=os.environ["MCP_CLINICAL_TRIALS"],
-        http_client=_MCP_HTTP_CLIENT,
-        load_prompts=False,
-    )
-
-    # Drop MCP servers whose host is unreachable so the unguarded connect/
-    # list-tools phase inside agent.run() can't crash the request with a 500.
-    candidate_tools = [
-        (icd10_tool, os.environ["MCP_ICD10_CODES"]),
-        (pubmed_tool, os.environ["MCP_PUBMED"]),
-        (trials_tool, os.environ["MCP_CLINICAL_TRIALS"]),
+    # --- MCP tool specs ---
+    # Tool INSTANCES are created per request (see handler) so each MCP
+    # streamable-HTTP connection is opened and closed in the SAME asyncio task.
+    # Module-level singletons get connected/cleaned-up across tasks by the
+    # framework/GC, which raises anyio's "Attempted to exit cancel scope in a
+    # different task" (a BaseExceptionGroup) on teardown — harmless locally but
+    # fatal (HTTP 500) in the hosted agentserver.
+    mcp_specs = [
+        ("icd10-codes", "Validate and look up ICD-10 diagnosis and procedure codes",
+         os.environ["MCP_ICD10_CODES"], _SafeMCPTool),
+        ("pubmed", "Search biomedical literature on PubMed",
+         os.environ["MCP_PUBMED"], _ReconnectingMCPTool),
+        ("clinical-trials", "Search ClinicalTrials.gov for relevant trials",
+         os.environ["MCP_CLINICAL_TRIALS"], _SafeMCPTool),
     ]
-    tools = []
-    for tool, url in candidate_tools:
+    # Drop unreachable MCP servers once at startup.
+    reachable_specs = []
+    for name, description, url, tool_cls in mcp_specs:
         if _host_reachable(url):
-            tools.append(tool)
+            reachable_specs.append((name, description, url, tool_cls))
         else:
-            print(f"[mcp] {tool.name} unreachable ({url}) — running without it")
+            print(f"[mcp] {name} unreachable ({url}) — running without it")
 
     # --- Skills from local directory ---
     skills_provider = SkillsProvider(
         skill_paths=str(Path(__file__).parent / "skills")
     )
 
-    # --- Agent using Responses API on Microsoft Foundry ---
-    # default_options enforces ClinicalResult schema on every agent.run() call
-    # made by the Responses protocol handler — token-level JSON constraint, no fence parsing.
-    agent = AzureOpenAIResponsesClient(
+    # Reusable model client; the agent (with per-request tools) is built per request.
+    chat_client = AzureOpenAIResponsesClient(
         project_endpoint=os.environ["AZURE_AI_PROJECT_ENDPOINT"],
         deployment_name=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
         credential=DefaultAzureCredential(),
-    ).as_agent(
-        name="clinical-reviewer-agent",
-        id="clinical-reviewer-agent",  # Must match registered agent name for Foundry Traces correlation
-        instructions=(
-            "You are a Clinical Reviewer Agent for prior authorization requests. "
-            "Use your clinical-review skill to validate ICD-10 codes, extract clinical "
-            "indicators with confidence scoring, search supporting literature, and "
-            "check for relevant clinical trials."
-        ),
-        tools=tools,
-        context_providers=[skills_provider],
-        default_options={"response_format": ClinicalResult},
+    )
+
+    _INSTRUCTIONS = (
+        "You are a Clinical Reviewer Agent for prior authorization requests. "
+        "Use your clinical-review skill to validate ICD-10 codes, extract clinical "
+        "indicators with confidence scoring, search supporting literature, and "
+        "check for relevant clinical trials."
     )
 
     # --- Serve as HTTP endpoint for Foundry hosting ---
@@ -295,8 +274,32 @@ def main() -> None:
     ):
         input_text = await _extract_input_text(request, context)
         try:
-            output_text = await _run_agent_for_responses(agent, input_text)
-        except Exception as exc:  # noqa: BLE001 — never surface a 500 to Foundry
+            # Connect MCP tools inside THIS request task and close them here too.
+            async with contextlib.AsyncExitStack() as stack:
+                tools = []
+                for name, description, url, tool_cls in reachable_specs:
+                    tool = tool_cls(
+                        name=name,
+                        description=description,
+                        url=url,
+                        http_client=_MCP_HTTP_CLIENT,
+                        load_prompts=False,
+                    )
+                    await stack.enter_async_context(tool)
+                    tools.append(tool)
+                # default_options enforces ClinicalResult schema (token-level JSON).
+                agent = chat_client.as_agent(
+                    name="clinical-reviewer-agent",
+                    id="clinical-reviewer-agent",  # match registered name for Foundry Traces
+                    instructions=_INSTRUCTIONS,
+                    tools=tools,
+                    context_providers=[skills_provider],
+                    default_options={"response_format": ClinicalResult},
+                )
+                output_text = await _run_agent_for_responses(agent, input_text)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001 — incl. anyio BaseExceptionGroup; never 500 to Foundry
             logger.exception("Clinical agent run failed; returning degraded fallback")
             output_text = _degraded_clinical_result(str(exc))
         return TextResponse(context, request, text=output_text)
