@@ -20,9 +20,12 @@ Health check:  GET /health  ->  200 {"status": "ok"}
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
+import re
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import uvicorn
@@ -231,34 +234,255 @@ async def search_npi(
 
 
 # ---------------------------------------------------------------------------
-# CMS coverage — Medicare Coverage Database (no public JSON API; pointer tool)
+# CMS coverage — official CMS Coverage API (api.coverage.cms.gov, MCIM v1.x)
+# Real NCD/LCD/Article data: ICD-10 covered/non-covered + HCPCS per policy.
+# A free license token (AMA/ADA/AHA click-through) is required for the
+# CPT/HCPCS-bearing endpoints; NCD reports are public.
 # ---------------------------------------------------------------------------
 cms = FastMCP("cms-coverage", stateless_http=True, json_response=True)
+_CMS = "https://api.coverage.cms.gov/v1"
+_MCD_VIEW = "https://www.cms.gov/medicare-coverage-database/view"
 _MCD_SEARCH = "https://www.cms.gov/medicare-coverage-database/search.aspx"
+
+# Small in-process caches (token, state map, NCD list) + a lock to fill them once.
+_cms_cache: dict[str, Any] = {"token": None, "states": None, "ncds": None}
+_cms_lock = asyncio.Lock()
+
+_STOPWORDS = {
+    "and", "or", "the", "for", "of", "to", "in", "a", "an", "billing", "coding",
+    "use", "home", "therapy", "treatment", "services", "service", "with",
+}
+_US_STATE_ABBR = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "DC": "District of Columbia", "FL": "Florida", "GA": "Georgia", "HI": "Hawaii",
+    "ID": "Idaho", "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+    "WI": "Wisconsin", "WY": "Wyoming",
+}
+
+
+def _terms(text: str) -> set[str]:
+    """Meaningful lowercase tokens (drop stopwords and <3-char tokens)."""
+    return {t for t in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(t) >= 3 and t not in _STOPWORDS}
+
+
+def _norm_code(code: str) -> str:
+    return (code or "").replace(".", "").strip().upper()
+
+
+async def _cms_get(path: str, params: dict | None = None, token: str | None = None) -> dict:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    resp = await _http.get(f"{_CMS}{path}", params=params or {}, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _cms_token() -> str:
+    if _cms_cache["token"]:
+        return _cms_cache["token"]
+    async with _cms_lock:
+        if not _cms_cache["token"]:
+            data = await _cms_get("/metadata/license-agreement/", {"accept": "true"})
+            _cms_cache["token"] = data["data"][0]["Token"]
+    return _cms_cache["token"]
+
+
+async def _resolve_state_id(state: str) -> int | None:
+    if not state:
+        return None
+    if _cms_cache["states"] is None:
+        data = await _cms_get("/metadata/states/")
+        _cms_cache["states"] = {r["description"].lower(): r["state_id"] for r in data.get("data", [])}
+    name = state.strip()
+    if len(name) == 2:
+        name = _US_STATE_ABBR.get(name.upper(), name)
+    return _cms_cache["states"].get(name.lower())
+
+
+async def _collect(path: str, params: dict, token: str, field: str, max_pages: int = 4) -> set[str]:
+    """Page through a code endpoint and collect normalized values of `field`."""
+    out: set[str] = set()
+    next_token = ""
+    for _ in range(max_pages):
+        page = dict(params, page_size=500)
+        if next_token:
+            page["next_token"] = next_token
+        data = await _cms_get(path, page, token)
+        for row in data.get("data", []):
+            if row.get(field):
+                out.add(_norm_code(str(row[field])))
+        next_token = (data.get("meta", {}) or {}).get("next_token") or ""
+        if not next_token:
+            break
+    return out
+
+
+def _rank(items: list[dict], query: set[str], top: int) -> list[dict]:
+    scored = []
+    for it in items:
+        score = len(query & _terms(it.get("title", "")))
+        if score:
+            scored.append((score, it))
+    scored.sort(key=lambda s: s[0], reverse=True)
+    return [it for _, it in scored[:top]]
+
+
+def _ncd_view_url(api_url: str) -> str:
+    qs = parse_qs(urlparse(api_url or "").query)
+    nid = (qs.get("ncdid") or [""])[0]
+    nver = (qs.get("ncdver") or [""])[0]
+    return f"{_MCD_VIEW}/ncd.aspx?ncdid={nid}&ncdver={nver}" if nid else ""
+
+
+async def _assess_article(art: dict, token: str, dx: list[str], px: list[str]) -> dict:
+    """Pull an article's code lists and check the request's dx/px against them."""
+    aid = art["document_id"]
+    covered, noncovered, hcpcs = await asyncio.gather(
+        _collect("/data/article/icd10-covered", {"articleid": aid}, token, "icd10_code_id"),
+        _collect("/data/article/icd10-noncovered", {"articleid": aid}, token, "icd10_code_id"),
+        _collect("/data/article/hcpc-code", {"articleid": aid}, token, "hcpc_code_id"),
+    )
+    dx_det = []
+    for code in dx:
+        n = _norm_code(code)
+        status = "covered" if n in covered else "not_covered" if n in noncovered else "not_listed"
+        dx_det.append({"code": code, "status": status})
+    px_det = [
+        {"code": code, "status": "addressed" if _norm_code(code) in hcpcs else "not_addressed"}
+        for code in px
+    ]
+    return {
+        "article_id": art.get("document_display_id", str(aid)),
+        "title": art.get("title", ""),
+        "url": f"{_MCD_VIEW}/article.aspx?articleId={aid}",
+        "diagnosis_determinations": dx_det,
+        "procedure_determinations": px_det,
+        "applies_to_procedure": any(d["status"] == "addressed" for d in px_det),
+    }
+
+
+async def _assess_lcd(lcd: dict, token: str, px: list[str]) -> dict:
+    """Pull an LCD's HCPCS list and check the request's procedure codes.
+
+    LCDs (esp. DME, e.g. Oxygen L33797) carry the HCPCS list; the ICD-10
+    medical-necessity lists live on the companion billing/coding article.
+    """
+    lid = lcd["document_id"]
+    hcpcs = await _collect("/data/lcd/hcpc-code", {"lcdid": lid}, token, "hcpc_code_id")
+    px_det = [
+        {"code": code, "status": "addressed" if _norm_code(code) in hcpcs else "not_addressed"}
+        for code in px
+    ]
+    return {
+        "lcd_id": lcd.get("document_display_id", str(lid)),
+        "title": lcd.get("title", ""),
+        "url": f"{_MCD_VIEW}/lcd.aspx?lcdid={lid}",
+        "procedure_determinations": px_det,
+        "applies_to_procedure": any(d["status"] == "addressed" for d in px_det),
+    }
 
 
 @cms.tool()
-async def search_coverage(keywords: str, codes: list[str] | None = None) -> dict[str, Any]:
-    """Return Medicare coverage (NCD/LCD) guidance for keywords/codes.
+async def search_coverage(
+    keywords: str,
+    procedure_codes: list[str] | None = None,
+    diagnosis_codes: list[str] | None = None,
+    state: str = "",
+) -> dict[str, Any]:
+    """Look up Medicare coverage (NCD/LCD) for a service via the CMS Coverage API.
 
-    The Medicare Coverage Database has no public JSON API, so this returns a
-    deep link to the official MCD search plus a manual-review flag rather than
-    fabricating policy text. The coverage agent should treat coverage criteria
-    sourced this way as requiring manual verification.
+    Returns matching National Coverage Determinations and, when a US state is
+    given, state-specific Local Coverage billing/coding articles — including
+    whether the supplied diagnosis codes appear in each article's medical-
+    necessity covered / non-covered ICD-10 lists and whether the procedure
+    codes are addressed. This yields a real MET/NOT_MET/INSUFFICIENT signal
+    grounded in CMS data (no fabricated policy text). Falls back to a Medicare
+    Coverage Database search link with a manual_review flag when nothing matches.
+
+    Args:
+        keywords: Clinical service description (e.g. "home oxygen", "MIGS").
+        procedure_codes: HCPCS/CPT codes from the request (e.g. ["E1390"]).
+        diagnosis_codes: ICD-10 codes from the request (e.g. ["J44.9"]).
+        state: 2-letter or full US state for Local Coverage (e.g. "TX").
     """
-    code_str = ", ".join(codes) if codes else ""
-    query = "+".join(p for p in [keywords, code_str] if p).replace(" ", "+")
-    return {
-        "status": "manual_review",
-        "keywords": keywords,
-        "codes": codes or [],
-        "mcd_search_url": f"{_MCD_SEARCH}?keyword={query}",
-        "note": (
-            "No programmatic NCD/LCD API exists. Verify coverage manually via the "
-            "linked Medicare Coverage Database search. Treat criteria as INSUFFICIENT "
-            "until confirmed."
-        ),
-    }
+    px = procedure_codes or []
+    dx = diagnosis_codes or []
+    query = _terms(keywords) | {_norm_code(c).lower() for c in px}
+    fallback = f"{_MCD_SEARCH}?keyword={keywords.replace(' ', '+')}"
+
+    try:
+        token = await _cms_token()
+
+        # NCDs — national, public. Cache the full list once.
+        if _cms_cache["ncds"] is None:
+            _cms_cache["ncds"] = (await _cms_get("/reports/national-coverage-ncd/")).get("data", [])
+        ncds = [
+            {
+                "ncd_id": n.get("document_display_id"),
+                "title": n.get("title"),
+                "url": _ncd_view_url(n.get("url", "")),
+            }
+            for n in _rank(_cms_cache["ncds"], query, top=3)
+        ]
+
+        # Local Coverage — state-specific, licensed. Billing/coding ARTICLES carry
+        # the ICD-10 medical-necessity lists; LCDs (esp. DME) carry the HCPCS list.
+        articles: list[dict] = []
+        lcds: list[dict] = []
+        state_id = await _resolve_state_id(state)
+        if state_id and query:
+            art_report, lcd_report = await asyncio.gather(
+                _cms_get("/reports/local-coverage-articles/", {"state_id": state_id}, token),
+                _cms_get("/reports/local-coverage-final-lcds/", {"state_id": state_id}, token),
+            )
+            art_cands = _rank(art_report.get("data", []), query, top=3)
+            lcd_cands = _rank(lcd_report.get("data", []), query, top=3)
+            if art_cands:
+                articles = list(
+                    await asyncio.gather(*(_assess_article(a, token, dx, px) for a in art_cands))
+                )
+            if lcd_cands:
+                lcds = list(
+                    await asyncio.gather(*(_assess_lcd(lcd_, token, px) for lcd_ in lcd_cands))
+                )
+
+        matched = bool(ncds or articles or lcds)
+        return {
+            "status": "matched" if matched else "manual_review",
+            "keywords": keywords,
+            "state": state,
+            "state_resolved": bool(state_id) if state else None,
+            "ncds": ncds,
+            "local_coverage_articles": articles,
+            "local_coverage_lcds": lcds,
+            "mcd_search_url": fallback,
+            "note": (
+                "Coverage grounded in the CMS Coverage API. Diagnosis statuses: "
+                "'covered'=supports medical necessity, 'not_covered'=explicitly "
+                "excluded, 'not_listed'=not enumerated (treat as INSUFFICIENT). "
+                "Provide patient state for Local Coverage article matching."
+                if matched
+                else "No NCD/LCD match; verify manually via the MCD search link "
+                "and treat criteria as INSUFFICIENT."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "manual_review",
+            "keywords": keywords,
+            "error": f"{type(exc).__name__}: {exc}",
+            "mcd_search_url": fallback,
+            "note": "CMS Coverage API unavailable; verify manually via the MCD search link.",
+        }
 
 
 # ---------------------------------------------------------------------------

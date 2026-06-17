@@ -11,7 +11,7 @@ third-party hosted endpoint that can disappear.
 | `/icd10/mcp` | `lookup_icd10`, `validate_icd10` | [NLM Clinical Tables ICD-10-CM](https://clinicaltables.nlm.nih.gov) |
 | `/clinical_trials/mcp` | `search_clinical_trials` | [ClinicalTrials.gov API v2](https://clinicaltrials.gov/data-api/api) |
 | `/npi/mcp` | `lookup_npi`, `search_npi` | [CMS NPPES NPI Registry](https://npiregistry.cms.hhs.gov) |
-| `/cms_coverage/mcp` | `search_coverage` | Medicare Coverage Database (pointer only — see below) |
+| `/cms_coverage/mcp` | `search_coverage` | [CMS Coverage API](https://api.coverage.cms.gov/docs/swagger/index.html) (NCD/LCD/Article — real determinations) |
 
 PubMed (`pubmed.mcp.claude.com`) was unaffected by the outage and stays as-is.
 
@@ -66,11 +66,17 @@ python mcp-servers/medical-data/test_client.py "$(azd env get-value MEDICAL_MCP_
 
 ## Notes & limitations
 
-- **CMS coverage** has no public JSON API for NCD/LCD policy text. `search_coverage`
-  returns a deep link to the official Medicare Coverage Database search plus a
-  `manual_review` flag rather than fabricating policy data. The coverage agent
-  treats criteria sourced this way as `INSUFFICIENT` (→ PEND), which matches the
-  system's lenient decision gate.
+- **CMS coverage** uses the official [CMS Coverage API](https://api.coverage.cms.gov/docs/swagger/index.html)
+  (MCIM). `search_coverage` returns real NCDs plus, when a US `state` is given,
+  Local Coverage articles/LCDs — with per-code determinations: a diagnosis is
+  `covered` (supports medical necessity), `not_covered` (excluded), or
+  `not_listed`; a procedure is `addressed`/`not_addressed`. ICD-10 lists live on
+  billing/coding **articles**; HCPCS lists on **LCDs** (esp. DME) — both are
+  checked. A free license token (AMA/ADA/AHA click-through, fetched
+  automatically) is required for CPT/HCPCS data; NCDs are public.
+  **Matching is by policy title keywords** (the API has no code→policy reverse
+  search), so pass good `keywords` and the patient `state`; when nothing matches
+  confidently it falls back to the MCD search link + `manual_review`.
 - **`billable` for ICD-10** is approximated as "exact match with no more-specific
   child code" (leaf node) from the NLM dataset.
 - **Public ingress.** The Container App has external ingress so Foundry-hosted

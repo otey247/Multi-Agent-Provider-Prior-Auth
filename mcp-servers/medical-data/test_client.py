@@ -20,7 +20,9 @@ CALLS = [
     ("icd10", "lookup_icd10", {"query": "chronic hypoxemia", "max_results": 3}),
     ("clinical_trials", "search_clinical_trials", {"condition": "COPD", "max_results": 2}),
     ("npi", "lookup_npi", {"npi_number": "1912084401"}),
-    ("cms_coverage", "search_coverage", {"keywords": "home oxygen", "codes": ["E1390"]}),
+    ("cms_coverage", "search_coverage",
+     {"keywords": "home oxygen", "procedure_codes": ["E1390"],
+      "diagnosis_codes": ["J44.9"], "state": "TX"}),
 ]
 
 
