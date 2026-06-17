@@ -6,18 +6,20 @@ MCP servers (`mcp.deepsense.ai`, now NXDOMAIN — see
 free, no-auth public health APIs so the prior-auth agents no longer depend on a
 third-party hosted endpoint that can disappear.
 
-| Path | Tools | Upstream API |
+| Path (server name) | Tools | Upstream API |
 |------|-------|--------------|
-| `/icd10/mcp` | `lookup_icd10`, `validate_icd10` | [NLM Clinical Tables ICD-10-CM](https://clinicaltables.nlm.nih.gov) |
-| `/clinical_trials/mcp` | `search_clinical_trials` | [ClinicalTrials.gov API v2](https://clinicaltrials.gov/data-api/api) |
-| `/npi/mcp` | `lookup_npi`, `search_npi` | [CMS NPPES NPI Registry](https://npiregistry.cms.hhs.gov) |
-| `/cms_coverage/mcp` | `search_coverage` | [CMS Coverage API](https://api.coverage.cms.gov/docs/swagger/index.html) (NCD/LCD/Article — real determinations) |
+| `/icd10/mcp` (icd10-codes) | `validate_code`, `lookup_code`, `search_codes`, `get_hierarchy` | [NLM Clinical Tables ICD-10-CM/PCS](https://clinicaltables.nlm.nih.gov) |
+| `/clinical_trials/mcp` (clinical-trials) | `search_trials`, `get_trial_details` | [ClinicalTrials.gov API v2](https://clinicaltrials.gov/data-api/api) |
+| `/npi/mcp` (npi-registry) | `npi_validate`, `npi_lookup`, `npi_search` | [CMS NPPES NPI Registry](https://npiregistry.cms.hhs.gov) |
+| `/cms_coverage/mcp` (cms-coverage) | `search_national_coverage`, `search_local_coverage`, `get_coverage_document`, `get_contractors` | [CMS Coverage API](https://api.coverage.cms.gov/docs/swagger/index.html) (NCD/LCD/Article — real determinations) |
 
 PubMed (`pubmed.mcp.claude.com`) was unaffected by the outage and stays as-is.
 
-The per-domain path layout mirrors DeepSense, so the agents need **only their
-`MCP_*` URLs repointed** here — no agent code changes. Transport is
-**stateless + JSON** (no session to expire), which is exactly what
+The tool **names and signatures match exactly what the agent `SKILL.md` files
+call** (the same contract the DeepSense servers exposed), so the clinical and
+coverage agents work unchanged. The per-domain path layout also mirrors
+DeepSense, so the agents need **only their `MCP_*` URLs repointed** here.
+Transport is **stateless + JSON** (no session to expire), which is exactly what
 agent_framework's `MCPStreamableHTTPTool` speaks.
 
 ## Run & test locally
@@ -29,8 +31,8 @@ python test_client.py                    # MCP smoke test against all 4 domains
 ```
 
 `test_client.py` connects over MCP Streamable HTTP (the same client stack the
-agents use), lists tools, and calls one tool per domain against the live
-upstream APIs. Expect `5/5 tool calls returned live data`.
+agents use), lists tools, and exercises the contract tool names against the live
+upstream APIs. Expect `9/9 tool calls returned live data`.
 
 Docker:
 
@@ -67,16 +69,17 @@ python mcp-servers/medical-data/test_client.py "$(azd env get-value MEDICAL_MCP_
 ## Notes & limitations
 
 - **CMS coverage** uses the official [CMS Coverage API](https://api.coverage.cms.gov/docs/swagger/index.html)
-  (MCIM). `search_coverage` returns real NCDs plus, when a US `state` is given,
-  Local Coverage articles/LCDs — with per-code determinations: a diagnosis is
-  `covered` (supports medical necessity), `not_covered` (excluded), or
-  `not_listed`; a procedure is `addressed`/`not_addressed`. ICD-10 lists live on
-  billing/coding **articles**; HCPCS lists on **LCDs** (esp. DME) — both are
-  checked. A free license token (AMA/ADA/AHA click-through, fetched
-  automatically) is required for CPT/HCPCS data; NCDs are public.
-  **Matching is by policy title keywords** (the API has no code→policy reverse
-  search), so pass good `keywords` and the patient `state`; when nothing matches
-  confidently it falls back to the MCD search link + `manual_review`.
+  (MCIM). `search_national_coverage` / `search_local_coverage` return ranked
+  NCDs / LCDs + billing-coding Articles; `get_coverage_document` returns a
+  policy's real ICD-10 covered/non-covered lists (Articles) and HCPCS list
+  (LCDs/Articles) for Diagnosis-Policy Alignment; `get_contractors` lists the
+  state's MACs. A free license token (AMA/ADA/AHA click-through, fetched
+  automatically) is required for the CPT/HCPCS-bearing endpoints; NCD reports are
+  public. **Policy discovery is by title keywords** (the API has no code→policy
+  reverse search), so the coverage agent's multi-pass keyword strategy + patient
+  `state` matter; ICD-10 medical-necessity lists live on billing/coding
+  **Articles**, HCPCS lists on **LCDs** (esp. DME) — `search_local_coverage`
+  returns both.
 - **`billable` for ICD-10** is approximated as "exact match with no more-specific
   child code" (leaf node) from the NLM dataset.
 - **Public ingress.** The Container App has external ingress so Foundry-hosted

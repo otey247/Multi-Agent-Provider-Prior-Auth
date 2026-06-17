@@ -1,16 +1,20 @@
 """Self-hosted medical-data MCP server (Streamable HTTP).
 
 Replaces the retired DeepSense MCP servers (mcp.deepsense.ai, now NXDOMAIN)
-with thin wrappers over official, free, no-auth public APIs:
+with thin wrappers over official, free, no-auth public APIs. Tool NAMES and
+signatures match exactly what the agent SKILL.md files call, so the clinical
+and coverage hosted agents work unchanged:
 
-  /icd10/mcp          NLM Clinical Tables ICD-10-CM   (lookup_icd10, validate_icd10)
-  /clinical_trials/mcp ClinicalTrials.gov API v2      (search_clinical_trials)
-  /npi/mcp            CMS NPPES NPI Registry API       (lookup_npi, search_npi)
-  /cms_coverage/mcp   Medicare Coverage Database (MCD) (search_coverage — pointer)
+  /icd10/mcp           NLM Clinical Tables      validate_code, lookup_code,
+                       ICD-10-CM / PCS          search_codes, get_hierarchy
+  /clinical_trials/mcp ClinicalTrials.gov v2    search_trials, get_trial_details
+  /npi/mcp             CMS NPPES Registry       npi_validate, npi_lookup, npi_search
+  /cms_coverage/mcp    CMS Coverage API (MCIM)  search_national_coverage,
+                       api.coverage.cms.gov     search_local_coverage,
+                                                get_coverage_document, get_contractors
 
-Each domain is mounted on its own path so the existing agents only need their
-MCP_* env URLs repointed here — no agent code changes. PubMed stays on
-pubmed.mcp.claude.com (unaffected by the DeepSense outage).
+Each domain is mounted on its own path so the agents only need their MCP_*
+env URLs repointed here. PubMed stays on pubmed.mcp.claude.com (unaffected).
 
 Transport: MCP Streamable HTTP, stateless + JSON responses (no session to
 expire), which is exactly what agent_framework's MCPStreamableHTTPTool speaks.
@@ -43,179 +47,289 @@ _http = httpx.AsyncClient(
 )
 
 
-async def _get_json(url: str, params: dict[str, Any]) -> Any:
+async def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
     """GET a JSON endpoint, raising for HTTP errors (caller wraps)."""
-    resp = await _http.get(url, params=params)
+    resp = await _http.get(url, params=params or {})
     resp.raise_for_status()
     return resp.json()
 
 
-def _normalize_code(code: str) -> str:
-    """ICD-10 code without the dot, uppercased, for robust comparison."""
+def _norm_code(code: str) -> str:
+    """A code without the dot, uppercased, for robust comparison."""
     return (code or "").replace(".", "").strip().upper()
 
 
+def _err(extra: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    return {**extra, "error": f"{type(exc).__name__}: {exc}"}
+
+
 # ---------------------------------------------------------------------------
-# ICD-10-CM — NLM Clinical Tables (https://clinicaltables.nlm.nih.gov)
+# ICD-10 — NLM Clinical Tables (https://clinicaltables.nlm.nih.gov)
+# Tools: validate_code, lookup_code, search_codes, get_hierarchy
 # ---------------------------------------------------------------------------
 icd10 = FastMCP("icd10-codes", stateless_http=True, json_response=True)
-_ICD10_URL = "https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search"
+
+
+async def _nlm_search(code_type: str, terms: str, search_by: str, max_list: int) -> tuple[int, list[dict]]:
+    """Search the NLM Clinical Tables ICD-10-CM (diagnosis) or PCS (procedure)."""
+    dataset = "icd10pcs" if code_type == "procedure" else "icd10cm"
+    sf = "code" if search_by == "code" else "name"
+    data = await _get_json(
+        f"https://clinicaltables.nlm.nih.gov/api/{dataset}/v3/search",
+        {"terms": terms, "maxList": max_list, "sf": sf, "df": "code,name"},
+    )
+    rows = data[3] if isinstance(data, list) and len(data) > 3 else []
+    total = data[0] if isinstance(data, list) and data else 0
+    return total, [{"code": r[0], "description": r[1]} for r in rows]
+
+
+async def _resolve_icd10(code: str, code_type: str) -> dict[str, Any]:
+    """Validate + describe a single code; billable = exact match with no children."""
+    target = _norm_code(code)
+    _, rows = await _nlm_search(code_type, code, "code", 200)
+    exact = next((r for r in rows if _norm_code(r["code"]) == target), None)
+    has_children = any(
+        _norm_code(r["code"]).startswith(target) and _norm_code(r["code"]) != target
+        for r in rows
+    )
+    return {
+        "code": code,
+        "code_type": code_type,
+        "valid": exact is not None,
+        "valid_for_hipaa": exact is not None,
+        "description": exact["description"] if exact else "",
+        "billable": exact is not None and not has_children,
+        "hierarchy_note": (
+            "Non-billable category header; use a more specific child code (call get_hierarchy)."
+            if exact is not None and has_children
+            else ""
+        ),
+    }
 
 
 @icd10.tool()
-async def lookup_icd10(query: str, max_results: int = 10) -> dict[str, Any]:
-    """Search ICD-10-CM diagnosis codes by code or description.
+async def validate_code(code: str, code_type: str = "diagnosis") -> dict[str, Any]:
+    """Validate a single ICD-10 code and report HIPAA validity + billable status.
 
     Args:
-        query: A partial code (e.g. "J44") or clinical term (e.g. "COPD").
-        max_results: Maximum number of matches to return (1-50).
+        code: ICD-10 code (e.g. "J44.1").
+        code_type: "diagnosis" for ICD-10-CM, "procedure" for ICD-10-PCS.
     """
     try:
-        n = max(1, min(int(max_results), 50))
-        data = await _get_json(
-            _ICD10_URL,
-            {"terms": query, "maxList": n, "sf": "code,name", "df": "code,name"},
-        )
-        rows = data[3] if isinstance(data, list) and len(data) > 3 else []
-        return {
-            "query": query,
-            "count": data[0] if isinstance(data, list) else 0,
-            "results": [{"code": r[0], "description": r[1]} for r in rows],
-        }
+        return await _resolve_icd10(code, code_type)
     except Exception as exc:  # noqa: BLE001
-        return {"query": query, "error": f"{type(exc).__name__}: {exc}", "results": []}
+        return _err({"code": code, "valid": False}, exc)
 
 
 @icd10.tool()
-async def validate_icd10(code: str) -> dict[str, Any]:
-    """Validate a single ICD-10-CM code and report whether it is billable.
+async def lookup_code(code: str, code_type: str = "diagnosis") -> dict[str, Any]:
+    """Get full details (description, HIPAA validity, billable) for one ICD-10 code."""
+    try:
+        return await _resolve_icd10(code, code_type)
+    except Exception as exc:  # noqa: BLE001
+        return _err({"code": code, "valid": False}, exc)
 
-    Billable is approximated: a code is billable when it matches exactly and
-    has no more-specific child codes (leaf node).
+
+@icd10.tool()
+async def search_codes(
+    query: str,
+    code_type: str = "diagnosis",
+    search_by: str = "description",
+    limit: int = 10,
+    exact: bool = False,
+    valid_for_hipaa_only: bool = True,
+) -> dict[str, Any]:
+    """Search ICD-10 codes by code prefix (search_by="code") or description text."""
+    try:
+        total, rows = await _nlm_search(code_type, query, search_by, max(1, min(int(limit), 50)))
+        return {"query": query, "code_type": code_type, "count": total, "results": rows}
+    except Exception as exc:  # noqa: BLE001
+        return _err({"query": query, "results": []}, exc)
+
+
+@icd10.tool()
+async def get_hierarchy(code_prefix: str, code_type: str = "diagnosis") -> dict[str, Any]:
+    """Get child codes under a category header, flagging billable leaf codes.
+
+    Use to find a specific billable code when a non-billable header was submitted.
     """
     try:
-        target = _normalize_code(code)
-        data = await _get_json(
-            _ICD10_URL,
-            {"terms": code, "maxList": 50, "sf": "code,name", "df": "code,name"},
-        )
-        rows = data[3] if isinstance(data, list) and len(data) > 3 else []
-        exact = next((r for r in rows if _normalize_code(r[0]) == target), None)
-        has_children = any(
-            _normalize_code(r[0]).startswith(target) and _normalize_code(r[0]) != target
-            for r in rows
-        )
-        return {
-            "code": code,
-            "valid": exact is not None,
-            "description": exact[1] if exact else "",
-            "billable": exact is not None and not has_children,
-            "hierarchy_note": (
-                "Non-billable category header; use a more specific child code."
-                if exact is not None and has_children
-                else ""
-            ),
-        }
+        target = _norm_code(code_prefix)
+        _, rows = await _nlm_search(code_type, code_prefix, "code", 500)
+        children = [r for r in rows if _norm_code(r["code"]).startswith(target)]
+        norms = [_norm_code(r["code"]) for r in children]
+        out = []
+        for r in children:
+            n = _norm_code(r["code"])
+            is_leaf = not any(o != n and o.startswith(n) for o in norms)
+            out.append({"code": r["code"], "description": r["description"], "billable": is_leaf})
+        return {"code_prefix": code_prefix, "count": len(out), "codes": out}
     except Exception as exc:  # noqa: BLE001
-        return {"code": code, "valid": False, "error": f"{type(exc).__name__}: {exc}"}
+        return _err({"code_prefix": code_prefix, "codes": []}, exc)
 
 
 # ---------------------------------------------------------------------------
 # Clinical trials — ClinicalTrials.gov API v2 (https://clinicaltrials.gov)
+# Tools: search_trials, get_trial_details
 # ---------------------------------------------------------------------------
 trials = FastMCP("clinical-trials", stateless_http=True, json_response=True)
 _CT_URL = "https://clinicaltrials.gov/api/v2/studies"
 
 
 @trials.tool()
-async def search_clinical_trials(condition: str, max_results: int = 5) -> dict[str, Any]:
-    """Search ClinicalTrials.gov for studies matching a condition or term.
+async def search_trials(query: str, status: str = "", phase: str = "", limit: int = 5) -> dict[str, Any]:
+    """Search ClinicalTrials.gov for studies matching a condition or intervention.
 
     Args:
-        condition: Condition or keyword (e.g. "COPD", "home oxygen therapy").
-        max_results: Maximum number of studies to return (1-20).
+        query: Condition/intervention keywords (e.g. "COPD home oxygen").
+        status: Optional overall status filter (e.g. "RECRUITING", "COMPLETED").
+        phase: Optional phase hint (appended to the query; v2 has no strict filter).
+        limit: Max studies to return (1-20).
     """
     try:
-        n = max(1, min(int(max_results), 20))
-        data = await _get_json(
-            _CT_URL,
-            {
-                "query.cond": condition,
-                "pageSize": n,
-                "fields": "NCTId,BriefTitle,OverallStatus",
-            },
-        )
+        n = max(1, min(int(limit), 20))
+        term = f"{query} {phase}".strip() if phase else query
+        params: dict[str, Any] = {
+            "query.term": term,
+            "pageSize": n,
+            "fields": "NCTId,BriefTitle,OverallStatus,Phase,Condition",
+        }
+        if status:
+            params["filter.overallStatus"] = status.upper()
+        data = await _get_json(_CT_URL, params)
         out = []
         for study in data.get("studies", []):
             ps = study.get("protocolSection", {})
             ident = ps.get("identificationModule", {})
-            status = ps.get("statusModule", {})
             out.append(
                 {
                     "nct_id": ident.get("nctId", ""),
                     "title": ident.get("briefTitle", ""),
-                    "status": status.get("overallStatus", ""),
+                    "status": ps.get("statusModule", {}).get("overallStatus", ""),
+                    "phases": ps.get("designModule", {}).get("phases", []),
                 }
             )
-        return {"condition": condition, "count": len(out), "results": out}
+        return {"query": query, "count": len(out), "results": out}
     except Exception as exc:  # noqa: BLE001
-        return {"condition": condition, "error": f"{type(exc).__name__}: {exc}", "results": []}
+        return _err({"query": query, "results": []}, exc)
+
+
+@trials.tool()
+async def get_trial_details(nct_id: str) -> dict[str, Any]:
+    """Get comprehensive details for a specific trial by NCT ID."""
+    try:
+        data = await _get_json(f"{_CT_URL}/{nct_id.strip().upper()}")
+        ps = data.get("protocolSection", {})
+        interventions = ps.get("armsInterventionsModule", {}).get("interventions", [])
+        return {
+            "nct_id": ps.get("identificationModule", {}).get("nctId", nct_id),
+            "title": ps.get("identificationModule", {}).get("briefTitle", ""),
+            "status": ps.get("statusModule", {}).get("overallStatus", ""),
+            "phases": ps.get("designModule", {}).get("phases", []),
+            "conditions": ps.get("conditionsModule", {}).get("conditions", []),
+            "interventions": [i.get("name", "") for i in interventions],
+            "brief_summary": ps.get("descriptionModule", {}).get("briefSummary", "")[:2000],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return _err({"nct_id": nct_id}, exc)
 
 
 # ---------------------------------------------------------------------------
 # NPI — CMS NPPES Registry API (https://npiregistry.cms.hhs.gov)
+# Tools: npi_validate (local Luhn), npi_lookup, npi_search
 # ---------------------------------------------------------------------------
 npi = FastMCP("npi-registry", stateless_http=True, json_response=True)
 _NPI_URL = "https://npiregistry.cms.hhs.gov/api/"
+
+
+def _luhn_ok(number: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(number)):
+        d = int(ch)
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def _npi_luhn_ok(npi_number: str) -> bool:
+    """NPI check-digit validation: Luhn over the 80840 prefix + the 10-digit NPI."""
+    if not re.fullmatch(r"\d{10}", npi_number or ""):
+        return False
+    return _luhn_ok("80840" + npi_number)
 
 
 def _format_npi_result(r: dict[str, Any]) -> dict[str, Any]:
     basic = r.get("basic", {})
     taxonomies = r.get("taxonomies", [])
     primary = next((t for t in taxonomies if t.get("primary")), taxonomies[0] if taxonomies else {})
-    if basic.get("organization_name"):
-        name = basic["organization_name"]
-    else:
-        name = f"{basic.get('first_name', '')} {basic.get('last_name', '')}".strip()
+    addresses = r.get("addresses", [])
+    loc = next(
+        (a for a in addresses if a.get("address_purpose") == "LOCATION"),
+        addresses[0] if addresses else {},
+    )
+    is_org = r.get("enumeration_type") == "NPI-2"
+    name = (
+        basic.get("organization_name")
+        if is_org
+        else f"{basic.get('first_name', '')} {basic.get('last_name', '')}".strip()
+    )
     deactivated = bool(basic.get("deactivation_date")) or basic.get("status") == "D"
     return {
         "npi": str(r.get("number", "")),
+        "provider_type": "Organization" if is_org else "Individual",
         "name": name,
         "credential": basic.get("credential", ""),
+        "status": "Deactivated" if deactivated else "Active",
         "specialty": primary.get("desc", ""),
         "taxonomy_code": primary.get("code", ""),
-        "status": "inactive" if deactivated else "active",
-        "enumeration_type": r.get("enumeration_type", ""),
+        "taxonomy_description": primary.get("desc", ""),
+        "license": primary.get("license", ""),
+        "state": loc.get("state", ""),
+        "address": ", ".join(
+            p for p in [loc.get("address_1", ""), loc.get("city", ""), loc.get("state", ""), loc.get("postal_code", "")] if p
+        ),
+        "phone": loc.get("telephone_number", ""),
     }
 
 
 @npi.tool()
-async def lookup_npi(npi_number: str) -> dict[str, Any]:
-    """Look up a provider by their 10-digit NPI number."""
-    try:
-        data = await _get_json(_NPI_URL, {"version": "2.1", "number": npi_number})
-        results = data.get("results", [])
-        if not results:
-            return {"npi": npi_number, "status": "not_found", "found": False}
-        return {"found": True, **_format_npi_result(results[0])}
-    except Exception as exc:  # noqa: BLE001
-        return {"npi": npi_number, "found": False, "error": f"{type(exc).__name__}: {exc}"}
+async def npi_validate(npi: str) -> dict[str, Any]:
+    """Validate NPI format and Luhn check digit locally (no API call)."""
+    ok = _npi_luhn_ok(npi)
+    return {
+        "npi": npi,
+        "valid": ok,
+        "detail": "Valid NPI format and check digit." if ok else "Invalid NPI format or check digit.",
+    }
 
 
 @npi.tool()
-async def search_npi(
+async def npi_lookup(npi: str) -> dict[str, Any]:
+    """Get comprehensive provider details by 10-digit NPI from CMS NPPES."""
+    try:
+        data = await _get_json(_NPI_URL, {"version": "2.1", "number": npi})
+        results = data.get("results", [])
+        if not results:
+            return {"npi": npi, "found": False, "status": "not_found"}
+        return {"found": True, **_format_npi_result(results[0])}
+    except Exception as exc:  # noqa: BLE001
+        return _err({"npi": npi, "found": False}, exc)
+
+
+@npi.tool()
+async def npi_search(
     first_name: str = "",
     last_name: str = "",
     state: str = "",
     taxonomy_description: str = "",
-    max_results: int = 10,
+    limit: int = 10,
 ) -> dict[str, Any]:
-    """Search the NPI registry by provider name, state, and/or specialty."""
+    """Search the NPPES Registry by provider name, state, and/or specialty."""
     try:
-        params: dict[str, Any] = {
-            "version": "2.1",
-            "limit": max(1, min(int(max_results), 50)),
-        }
+        params: dict[str, Any] = {"version": "2.1", "limit": max(1, min(int(limit), 50))}
         if first_name:
             params["first_name"] = first_name
         if last_name:
@@ -230,22 +344,22 @@ async def search_npi(
             "results": [_format_npi_result(r) for r in data.get("results", [])],
         }
     except Exception as exc:  # noqa: BLE001
-        return {"error": f"{type(exc).__name__}: {exc}", "results": []}
+        return _err({"results": []}, exc)
 
 
 # ---------------------------------------------------------------------------
 # CMS coverage — official CMS Coverage API (api.coverage.cms.gov, MCIM v1.x)
 # Real NCD/LCD/Article data: ICD-10 covered/non-covered + HCPCS per policy.
-# A free license token (AMA/ADA/AHA click-through) is required for the
+# A free license token (AMA/ADA/AHA click-through) is auto-fetched for the
 # CPT/HCPCS-bearing endpoints; NCD reports are public.
+# Tools: search_national_coverage, search_local_coverage,
+#        get_coverage_document, get_contractors
 # ---------------------------------------------------------------------------
 cms = FastMCP("cms-coverage", stateless_http=True, json_response=True)
 _CMS = "https://api.coverage.cms.gov/v1"
 _MCD_VIEW = "https://www.cms.gov/medicare-coverage-database/view"
-_MCD_SEARCH = "https://www.cms.gov/medicare-coverage-database/search.aspx"
 
-# Small in-process caches (token, state map, NCD list) + a lock to fill them once.
-_cms_cache: dict[str, Any] = {"token": None, "states": None, "ncds": None}
+_cms_cache: dict[str, Any] = {"token": None, "states": None, "ncds": None, "ncd_index": None}
 _cms_lock = asyncio.Lock()
 
 _STOPWORDS = {
@@ -270,13 +384,8 @@ _US_STATE_ABBR = {
 
 
 def _terms(text: str) -> set[str]:
-    """Meaningful lowercase tokens (drop stopwords and <3-char tokens)."""
     return {t for t in re.findall(r"[a-z0-9]+", (text or "").lower())
             if len(t) >= 3 and t not in _STOPWORDS}
-
-
-def _norm_code(code: str) -> str:
-    return (code or "").replace(".", "").strip().upper()
 
 
 async def _cms_get(path: str, params: dict | None = None, token: str | None = None) -> dict:
@@ -308,22 +417,26 @@ async def _resolve_state_id(state: str) -> int | None:
     return _cms_cache["states"].get(name.lower())
 
 
-async def _collect(path: str, params: dict, token: str, field: str, max_pages: int = 4) -> set[str]:
-    """Page through a code endpoint and collect normalized values of `field`."""
-    out: set[str] = set()
-    next_token = ""
-    for _ in range(max_pages):
-        page = dict(params, page_size=500)
-        if next_token:
-            page["next_token"] = next_token
-        data = await _cms_get(path, page, token)
-        for row in data.get("data", []):
-            if row.get(field):
-                out.add(_norm_code(str(row[field])))
-        next_token = (data.get("meta", {}) or {}).get("next_token") or ""
-        if not next_token:
-            break
-    return out
+def _ncd_ids(api_url: str) -> tuple[str, str]:
+    qs = parse_qs(urlparse(api_url or "").query)
+    return (qs.get("ncdid") or [""])[0], (qs.get("ncdver") or [""])[0]
+
+
+def _ncd_view_url(api_url: str) -> str:
+    nid, nver = _ncd_ids(api_url)
+    return f"{_MCD_VIEW}/ncd.aspx?ncdid={nid}&ncdver={nver}" if nid else ""
+
+
+async def _ensure_ncds() -> None:
+    if _cms_cache["ncds"] is None:
+        rows = (await _cms_get("/reports/national-coverage-ncd/")).get("data", [])
+        _cms_cache["ncds"] = rows
+        idx: dict[str, tuple[str, str]] = {}
+        for r in rows:
+            nid, nver = _ncd_ids(r.get("url", ""))
+            if r.get("document_display_id") and nid:
+                idx[str(r["document_display_id"])] = (nid, nver)
+        _cms_cache["ncd_index"] = idx
 
 
 def _rank(items: list[dict], query: set[str], top: int) -> list[dict]:
@@ -336,153 +449,204 @@ def _rank(items: list[dict], query: set[str], top: int) -> list[dict]:
     return [it for _, it in scored[:top]]
 
 
-def _ncd_view_url(api_url: str) -> str:
-    qs = parse_qs(urlparse(api_url or "").query)
-    nid = (qs.get("ncdid") or [""])[0]
-    nver = (qs.get("ncdver") or [""])[0]
-    return f"{_MCD_VIEW}/ncd.aspx?ncdid={nid}&ncdver={nver}" if nid else ""
+async def _safe_report(path: str, params: dict, token: str) -> list[dict]:
+    try:
+        return (await _cms_get(path, params, token)).get("data", [])
+    except Exception:  # noqa: BLE001
+        return []
 
 
-async def _assess_article(art: dict, token: str, dx: list[str], px: list[str]) -> dict:
-    """Pull an article's code lists and check the request's dx/px against them."""
-    aid = art["document_id"]
-    covered, noncovered, hcpcs = await asyncio.gather(
-        _collect("/data/article/icd10-covered", {"articleid": aid}, token, "icd10_code_id"),
-        _collect("/data/article/icd10-noncovered", {"articleid": aid}, token, "icd10_code_id"),
-        _collect("/data/article/hcpc-code", {"articleid": aid}, token, "hcpc_code_id"),
-    )
-    dx_det = []
-    for code in dx:
-        n = _norm_code(code)
-        status = "covered" if n in covered else "not_covered" if n in noncovered else "not_listed"
-        dx_det.append({"code": code, "status": status})
-    px_det = [
-        {"code": code, "status": "addressed" if _norm_code(code) in hcpcs else "not_addressed"}
-        for code in px
-    ]
-    return {
-        "article_id": art.get("document_display_id", str(aid)),
-        "title": art.get("title", ""),
-        "url": f"{_MCD_VIEW}/article.aspx?articleId={aid}",
-        "diagnosis_determinations": dx_det,
-        "procedure_determinations": px_det,
-        "applies_to_procedure": any(d["status"] == "addressed" for d in px_det),
-    }
-
-
-async def _assess_lcd(lcd: dict, token: str, px: list[str]) -> dict:
-    """Pull an LCD's HCPCS list and check the request's procedure codes.
-
-    LCDs (esp. DME, e.g. Oxygen L33797) carry the HCPCS list; the ICD-10
-    medical-necessity lists live on the companion billing/coding article.
-    """
-    lid = lcd["document_id"]
-    hcpcs = await _collect("/data/lcd/hcpc-code", {"lcdid": lid}, token, "hcpc_code_id")
-    px_det = [
-        {"code": code, "status": "addressed" if _norm_code(code) in hcpcs else "not_addressed"}
-        for code in px
-    ]
-    return {
-        "lcd_id": lcd.get("document_display_id", str(lid)),
-        "title": lcd.get("title", ""),
-        "url": f"{_MCD_VIEW}/lcd.aspx?lcdid={lid}",
-        "procedure_determinations": px_det,
-        "applies_to_procedure": any(d["status"] == "addressed" for d in px_det),
-    }
+async def _collect_rows(path: str, params: dict, token: str, code_field: str,
+                        desc_field: str = "description", cap: int = 500) -> list[dict]:
+    """Page through a code endpoint, collecting {code, description} up to `cap`."""
+    out: list[dict] = []
+    next_token = ""
+    for _ in range(6):
+        page = dict(params, page_size=500)
+        if next_token:
+            page["next_token"] = next_token
+        data = await _cms_get(path, page, token)
+        for row in data.get("data", []):
+            c = row.get(code_field)
+            if c:
+                out.append({"code": str(c), "description": row.get(desc_field, "")})
+        if len(out) >= cap:
+            return out[:cap]
+        next_token = (data.get("meta", {}) or {}).get("next_token") or ""
+        if not next_token:
+            break
+    return out
 
 
 @cms.tool()
-async def search_coverage(
-    keywords: str,
-    procedure_codes: list[str] | None = None,
-    diagnosis_codes: list[str] | None = None,
-    state: str = "",
-) -> dict[str, Any]:
-    """Look up Medicare coverage (NCD/LCD) for a service via the CMS Coverage API.
+async def search_national_coverage(keyword: str, document_type: str = "NCD", limit: int = 10) -> dict[str, Any]:
+    """Search National Coverage Determinations (NCDs) by keyword.
 
-    Returns matching National Coverage Determinations and, when a US state is
-    given, state-specific Local Coverage billing/coding articles — including
-    whether the supplied diagnosis codes appear in each article's medical-
-    necessity covered / non-covered ICD-10 lists and whether the procedure
-    codes are addressed. This yields a real MET/NOT_MET/INSUFFICIENT signal
-    grounded in CMS data (no fabricated policy text). Falls back to a Medicare
-    Coverage Database search link with a manual_review flag when nothing matches.
-
-    Args:
-        keywords: Clinical service description (e.g. "home oxygen", "MIGS").
-        procedure_codes: HCPCS/CPT codes from the request (e.g. ["E1390"]).
-        diagnosis_codes: ICD-10 codes from the request (e.g. ["J44.9"]).
-        state: 2-letter or full US state for Local Coverage (e.g. "TX").
+    NCDs are nationwide Medicare coverage policies. Returns ranked matches with
+    a policy_id usable in get_coverage_document(document_type="NCD").
     """
-    px = procedure_codes or []
-    dx = diagnosis_codes or []
-    query = _terms(keywords) | {_norm_code(c).lower() for c in px}
-    fallback = f"{_MCD_SEARCH}?keyword={keywords.replace(' ', '+')}"
-
     try:
-        token = await _cms_token()
-
-        # NCDs — national, public. Cache the full list once.
-        if _cms_cache["ncds"] is None:
-            _cms_cache["ncds"] = (await _cms_get("/reports/national-coverage-ncd/")).get("data", [])
-        ncds = [
-            {
-                "ncd_id": n.get("document_display_id"),
-                "title": n.get("title"),
-                "url": _ncd_view_url(n.get("url", "")),
-            }
-            for n in _rank(_cms_cache["ncds"], query, top=3)
-        ]
-
-        # Local Coverage — state-specific, licensed. Billing/coding ARTICLES carry
-        # the ICD-10 medical-necessity lists; LCDs (esp. DME) carry the HCPCS list.
-        articles: list[dict] = []
-        lcds: list[dict] = []
-        state_id = await _resolve_state_id(state)
-        if state_id and query:
-            art_report, lcd_report = await asyncio.gather(
-                _cms_get("/reports/local-coverage-articles/", {"state_id": state_id}, token),
-                _cms_get("/reports/local-coverage-final-lcds/", {"state_id": state_id}, token),
-            )
-            art_cands = _rank(art_report.get("data", []), query, top=3)
-            lcd_cands = _rank(lcd_report.get("data", []), query, top=3)
-            if art_cands:
-                articles = list(
-                    await asyncio.gather(*(_assess_article(a, token, dx, px) for a in art_cands))
-                )
-            if lcd_cands:
-                lcds = list(
-                    await asyncio.gather(*(_assess_lcd(lcd_, token, px) for lcd_ in lcd_cands))
-                )
-
-        matched = bool(ncds or articles or lcds)
+        await _ensure_ncds()
+        ranked = _rank(_cms_cache["ncds"], _terms(keyword), max(1, min(int(limit), 25)))
         return {
-            "status": "matched" if matched else "manual_review",
-            "keywords": keywords,
-            "state": state,
-            "state_resolved": bool(state_id) if state else None,
-            "ncds": ncds,
-            "local_coverage_articles": articles,
-            "local_coverage_lcds": lcds,
-            "mcd_search_url": fallback,
-            "note": (
-                "Coverage grounded in the CMS Coverage API. Diagnosis statuses: "
-                "'covered'=supports medical necessity, 'not_covered'=explicitly "
-                "excluded, 'not_listed'=not enumerated (treat as INSUFFICIENT). "
-                "Provide patient state for Local Coverage article matching."
-                if matched
-                else "No NCD/LCD match; verify manually via the MCD search link "
-                "and treat criteria as INSUFFICIENT."
-            ),
+            "keyword": keyword,
+            "count": len(ranked),
+            "results": [
+                {
+                    "policy_id": r.get("document_display_id"),
+                    "title": r.get("title"),
+                    "type": "NCD",
+                    "relevant": True,
+                    "url": _ncd_view_url(r.get("url", "")),
+                }
+                for r in ranked
+            ],
         }
     except Exception as exc:  # noqa: BLE001
+        return _err({"keyword": keyword, "results": []}, exc)
+
+
+@cms.tool()
+async def search_local_coverage(
+    keyword: str, document_type: str = "LCD", limit: int = 10, state: str = ""
+) -> dict[str, Any]:
+    """Search Local Coverage (LCDs + billing/coding Articles) by keyword.
+
+    LCDs carry the HCPCS list; billing/coding Articles carry the ICD-10
+    medical-necessity covered/non-covered lists — both are returned, ranked.
+    Provide the patient's `state` (2-letter or full) for jurisdiction filtering.
+    Use get_coverage_document on a returned policy_id to pull its full criteria.
+    """
+    try:
+        token = await _cms_token()
+        state_id = await _resolve_state_id(state)
+        q = _terms(keyword)
+        n = max(1, min(int(limit), 25))
+        params = {"state_id": state_id} if state_id else {}
+        lcds = await _safe_report("/reports/local-coverage-final-lcds/", params, token)
+        arts = await _safe_report("/reports/local-coverage-articles/", params, token)
+        results = []
+        for r in _rank(lcds, q, n):
+            results.append({
+                "policy_id": r.get("document_display_id"),
+                "document_id": r.get("document_id"),
+                "title": r.get("title"),
+                "type": "LCD",
+                "relevant": True,
+                "url": f"{_MCD_VIEW}/lcd.aspx?lcdid={r.get('document_id')}",
+            })
+        for r in _rank(arts, q, n):
+            results.append({
+                "policy_id": r.get("document_display_id"),
+                "document_id": r.get("document_id"),
+                "title": r.get("title"),
+                "type": "Article",
+                "relevant": True,
+                "url": f"{_MCD_VIEW}/article.aspx?articleId={r.get('document_id')}",
+            })
         return {
-            "status": "manual_review",
-            "keywords": keywords,
-            "error": f"{type(exc).__name__}: {exc}",
-            "mcd_search_url": fallback,
-            "note": "CMS Coverage API unavailable; verify manually via the MCD search link.",
+            "keyword": keyword,
+            "state": state,
+            "state_resolved": bool(state_id) if state else None,
+            "count": len(results),
+            "results": results,
         }
+    except Exception as exc:  # noqa: BLE001
+        return _err({"keyword": keyword, "results": []}, exc)
+
+
+@cms.tool()
+async def get_coverage_document(document_id: str, document_type: str = "") -> dict[str, Any]:
+    """Get the criteria for a coverage policy (NCD, LCD, or Article).
+
+    Accepts a display id ("240.2", "L33797", "A52514") or numeric id. For
+    Articles, returns covered/non-covered ICD-10 lists + HCPCS; for LCDs, the
+    HCPCS list; for NCDs, the policy text fields. Use the ICD-10 covered list
+    for Diagnosis-Policy Alignment.
+    """
+    did = str(document_id).strip()
+    dtype = (document_type or "").strip().lower()
+    try:
+        token = await _cms_token()
+        numeric = re.sub(r"\D", "", did)
+
+        if did[:1].upper() == "A" or dtype == "article":
+            covered, noncovered, hcpcs = await asyncio.gather(
+                _collect_rows("/data/article/icd10-covered", {"articleid": numeric}, token, "icd10_code_id"),
+                _collect_rows("/data/article/icd10-noncovered", {"articleid": numeric}, token, "icd10_code_id"),
+                _collect_rows("/data/article/hcpc-code", {"articleid": numeric}, token, "hcpc_code_id", "long_description"),
+            )
+            return {
+                "document_id": did,
+                "type": "Article",
+                "url": f"{_MCD_VIEW}/article.aspx?articleId={numeric}",
+                "covered_icd10": covered,
+                "noncovered_icd10": noncovered,
+                "hcpcs": hcpcs,
+            }
+
+        if did[:1].upper() == "L" or dtype == "lcd":
+            lcd_data, hcpcs = await asyncio.gather(
+                _cms_get("/data/lcd/", {"lcdid": numeric}, token),
+                _collect_rows("/data/lcd/hcpc-code", {"lcdid": numeric}, token, "hcpc_code_id", "long_description"),
+            )
+            row = (lcd_data.get("data") or [{}])[0]
+            return {
+                "document_id": did,
+                "type": "LCD",
+                "title": row.get("title", ""),
+                "url": f"{_MCD_VIEW}/lcd.aspx?lcdid={numeric}",
+                "hcpcs": hcpcs,
+                "policy_fields": _short_fields(row),
+            }
+
+        # NCD — resolve display id ("240.2") via the cached index, else numeric.
+        await _ensure_ncds()
+        nid, nver = _cms_cache["ncd_index"].get(did, (numeric or None, ""))
+        if not nid:
+            return {"document_id": did, "type": "NCD", "error": "Unresolved NCD id"}
+        ncd_params = {"ncdid": nid}
+        if nver:
+            ncd_params["ncdver"] = nver
+        ncd_data = await _cms_get("/data/ncd/", ncd_params, token)
+        row = (ncd_data.get("data") or [{}])[0]
+        return {
+            "document_id": did,
+            "type": "NCD",
+            "title": row.get("title", ""),
+            "url": f"{_MCD_VIEW}/ncd.aspx?ncdid={nid}&ncdver={nver}",
+            "policy_fields": _short_fields(row),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return _err({"document_id": did, "type": document_type or "unknown"}, exc)
+
+
+def _short_fields(row: dict[str, Any], limit: int = 6000) -> dict[str, str]:
+    """Non-empty string fields short enough to be useful policy text."""
+    return {k: v for k, v in row.items() if isinstance(v, str) and v.strip() and len(v) < limit}
+
+
+@cms.tool()
+async def get_contractors(state: str, contractor_type: str = "", limit: int = 5) -> dict[str, Any]:
+    """Get Medicare Administrative Contractors (MACs) whose LCDs apply to a state."""
+    try:
+        token = await _cms_token()
+        state_id = await _resolve_state_id(state)
+        if not state_id:
+            return {"state": state, "resolved": False, "contractors": [],
+                    "note": "State not resolved; provide a valid US state (2-letter or full)."}
+        rows = await _safe_report("/reports/local-coverage-final-lcds/", {"state_id": state_id}, token)
+        seen: list[str] = []
+        for r in rows:
+            c = r.get("contractor_name_type") or r.get("contractor")
+            if c and c not in seen:
+                seen.append(c)
+            if len(seen) >= max(1, min(int(limit), 20)):
+                break
+        return {"state": state, "state_id": state_id, "resolved": True,
+                "contractors": [{"name": c} for c in seen]}
+    except Exception as exc:  # noqa: BLE001
+        return _err({"state": state, "contractors": []}, exc)
 
 
 # ---------------------------------------------------------------------------

@@ -16,13 +16,15 @@ from mcp.client.streamable_http import streamablehttp_client
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080").rstrip("/")
 
 CALLS = [
-    ("icd10", "validate_icd10", {"code": "J44.9"}),
-    ("icd10", "lookup_icd10", {"query": "chronic hypoxemia", "max_results": 3}),
-    ("clinical_trials", "search_clinical_trials", {"condition": "COPD", "max_results": 2}),
-    ("npi", "lookup_npi", {"npi_number": "1912084401"}),
-    ("cms_coverage", "search_coverage",
-     {"keywords": "home oxygen", "procedure_codes": ["E1390"],
-      "diagnosis_codes": ["J44.9"], "state": "TX"}),
+    ("icd10", "validate_code", {"code": "J44.1", "code_type": "diagnosis"}),
+    ("icd10", "get_hierarchy", {"code_prefix": "J44"}),
+    ("clinical_trials", "search_trials", {"query": "COPD", "limit": 2}),
+    ("npi", "npi_validate", {"npi": "1912084401"}),
+    ("npi", "npi_lookup", {"npi": "1912084401"}),
+    ("cms_coverage", "search_national_coverage", {"keyword": "home oxygen"}),
+    ("cms_coverage", "search_local_coverage", {"keyword": "oxygen", "state": "TX"}),
+    ("cms_coverage", "get_contractors", {"state": "TX"}),
+    ("cms_coverage", "get_coverage_document", {"document_id": "L33797", "document_type": "LCD"}),
 ]
 
 
