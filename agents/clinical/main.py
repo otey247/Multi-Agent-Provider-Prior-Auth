@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import socket
+import traceback
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -279,12 +280,18 @@ def main() -> None:
         context: ResponseContext,
         cancellation_signal,
     ):
-        input_text = await _extract_input_text(request, context)
+        # DIAGNOSTIC BUILD: surface the real failure (incl. CancelledError) in the
+        # response body with the stage it failed at, so we can see why the hosted
+        # runtime returns an empty-body 500. Revert to the re-raise + degraded
+        # fallback (see git history) once the cause is identified.
+        stage = "start"
         try:
+            input_text = await _extract_input_text(request, context)
             # Connect the toolbox tool inside THIS request task and close it here.
             async with contextlib.AsyncExitStack() as stack:
                 tools = []
                 if toolbox_endpoint:
+                    stage = "connect_toolbox"
                     toolbox = _ToolboxMCPTool(
                         name="clinical-tools",
                         description=(
@@ -298,6 +305,7 @@ def main() -> None:
                     await stack.enter_async_context(toolbox)
                     tools.append(toolbox)
                 # default_options enforces ClinicalResult schema (token-level JSON).
+                stage = "build_agent"
                 agent = chat_client.as_agent(
                     name="clinical-reviewer-agent",
                     id="clinical-reviewer-agent",  # match registered name for Foundry Traces
@@ -306,12 +314,19 @@ def main() -> None:
                     context_providers=[skills_provider],
                     default_options={"response_format": ClinicalResult},
                 )
+                stage = "run"
                 output_text = await _run_agent_for_responses(agent, input_text)
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:  # noqa: BLE001 — incl. anyio BaseExceptionGroup; never 500 to Foundry
-            logger.exception("Clinical agent run failed; returning degraded fallback")
-            output_text = _degraded_clinical_result(str(exc))
+                stage = "done"
+        except BaseException as exc:  # noqa: BLE001 — DIAGNOSTIC: catch CancelledError too
+            logger.exception("Clinical agent failed at stage=%s", stage)
+            output_text = json.dumps(
+                {
+                    "DIAGNOSTIC_ERROR": type(exc).__name__,
+                    "stage": stage,
+                    "detail": str(exc)[:800],
+                    "trace": traceback.format_exc()[:3000],
+                }
+            )
         return TextResponse(context, request, text=output_text)
 
     app.run()
