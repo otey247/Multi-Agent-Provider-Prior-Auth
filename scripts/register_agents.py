@@ -23,9 +23,12 @@ Required environment variables (set automatically by the postprovision hook):
   AZURE_RESOURCE_GROUP               — Resource group name
 
 Optional environment variables:
-  APPLICATION_INSIGHTS_CONNECTION_STRING — Logged by this script if present; not passed
-                                           to Hosted Agents because the platform
-                                           reserves App Insights env names.
+  APPLICATION_INSIGHTS_CONNECTION_STRING — If present, passed to Hosted Agents as
+                                           MONITORING_CONNECTION_STRING (the reserved
+                                           APPLICATION*INSIGHTS names are rejected in the
+                                           registration payload; each agent's main.py
+                                           bridges it to APPLICATIONINSIGHTS_CONNECTION_STRING
+                                           at startup so the agentserver exports telemetry).
   IMAGE_TAG                             — ACR image tag (default: latest)
   HOSTED_AGENT_RESPONSES_PROTOCOL_VERSION — Responses container protocol version
                                             (default: v0.1.1)
@@ -34,6 +37,7 @@ Optional environment variables:
 import os
 import subprocess
 import sys
+import time
 
 
 # ---------------------------------------------------------------------------
@@ -107,56 +111,42 @@ def _run_agent_start_command(
     project_name: str,
     agent_name: str,
     version_num: str,
+    attempts: int = 3,
 ) -> tuple[bool, str]:
-    """Start a hosted agent, trying known CLI parameter variants.
+    """Start a hosted agent via the (preview) CLI.
 
-    The Foundry Hosted Agent CLI surface is preview and has changed between
-    extension versions. Keep the variants narrow, and return stderr so the
-    deployment log preserves the real Azure CLI failure instead of only exit
-    code 3.
+    Only ``--agent-version`` is valid for this command (the older ``--version``
+    and no-version forms are arg errors, so they are not tried). A freshly
+    created version can briefly 404 ("Operation returned an invalid status
+    'Not Found'") before it becomes startable, so retry a few times with a
+    short backoff. Auto-start is best-effort: scale-to-zero agents also
+    cold-start on the first request, so a persistent failure is non-fatal.
     """
-    base_cmd = [
-        "az",
-        "cognitiveservices",
-        "agent",
-        "start",
-        "--account-name",
-        account_name,
-        "--project-name",
-        project_name,
-        "--name",
-        agent_name,
-    ]
-    variants = [
-        base_cmd + ["--agent-version", version_num],
-        base_cmd + ["--version", version_num],
-        base_cmd,
+    cmd = [
+        "az", "cognitiveservices", "agent", "start",
+        "--account-name", account_name,
+        "--project-name", project_name,
+        "--name", agent_name,
+        "--agent-version", version_num,
     ]
 
-    failures: list[str] = []
-    for cmd in variants:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+    last = ""
+    for attempt in range(1, attempts + 1):
+        result = subprocess.run(cmd, capture_output=True, text=True)
         output = "\n".join(
             part.strip() for part in (result.stdout, result.stderr) if part.strip()
         )
-
-        if result.returncode == 0:
+        if result.returncode == 0 or "already exists with status Running" in output:
             return True, output
 
-        if "already exists with status Running" in output:
-            return True, output
+        last = f"exit={result.returncode}: {output or '(no output)'}"
+        # A just-created version often 404s until it is startable — retry.
+        if attempt < attempts and "Not Found" in output:
+            time.sleep(8)
+            continue
+        break
 
-        failures.append(
-            f"$ {' '.join(cmd)}\n"
-            f"exit={result.returncode}\n"
-            f"{output or '(no output)'}"
-        )
-
-    return False, "\n\n".join(failures)
+    return False, last
 
 
 def _build_hosted_agent_definition(
@@ -360,13 +350,14 @@ def run() -> None:
 
     if app_insights_cs:
         print(
-            f"  App Insights: connection string available to deployment hook "
-            f"(len={len(app_insights_cs)}); not passing it to Hosted Agents"
+            f"  App Insights: connection string available (len={len(app_insights_cs)}); "
+            f"passing via MONITORING_CONNECTION_STRING (the reserved APPLICATION*INSIGHTS "
+            f"names are rejected by the platform; each agent bridges it at startup)"
         )
     else:
         print(
             "  App Insights: connection string not set in hook environment. "
-            "Hosted Agent platform telemetry env vars will still be injected if configured."
+            "Hosted Agent telemetry will be disabled."
         )
 
     if not project_endpoint:
@@ -496,6 +487,7 @@ def run() -> None:
             "env": {
                 "AI_FOUNDRY_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
+                "MONITORING_CONNECTION_STRING": app_insights_cs,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": model_name,
                 "MCP_ICD10_CODES": mcp_icd10,
                 "MCP_PUBMED": mcp_pubmed,
@@ -516,6 +508,7 @@ def run() -> None:
             "env": {
                 "AI_FOUNDRY_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
+                "MONITORING_CONNECTION_STRING": app_insights_cs,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": model_name,
                 "MCP_NPI_REGISTRY": mcp_npi,
                 "MCP_CMS_COVERAGE": mcp_cms,
@@ -536,6 +529,7 @@ def run() -> None:
             "env": {
                 "AI_FOUNDRY_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
+                "MONITORING_CONNECTION_STRING": app_insights_cs,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": os.environ.get(
                     "AZURE_OPENAI_COMPLIANCE_DEPLOYMENT_NAME", "gpt-5.4"
                 ),
@@ -556,6 +550,7 @@ def run() -> None:
             "env": {
                 "AI_FOUNDRY_PROJECT_ENDPOINT": project_endpoint,
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
+                "MONITORING_CONNECTION_STRING": app_insights_cs,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": model_name,
             },
             "tools": [],

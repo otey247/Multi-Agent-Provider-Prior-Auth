@@ -190,7 +190,7 @@ async def _extract_input_text(request: CreateResponse, context: ResponseContext)
 
 def main() -> None:
     # --- Observability: env var setup for Foundry agentserver adapter ---
-    _ai_conn = os.environ.get("APPLICATION_INSIGHTS_CONNECTION_STRING")
+    _ai_conn = os.environ.get("APPLICATION_INSIGHTS_CONNECTION_STRING") or os.environ.get("MONITORING_CONNECTION_STRING")
     if _ai_conn:
         os.environ.setdefault("APPLICATIONINSIGHTS_CONNECTION_STRING", _ai_conn)
         print("[observability] App Insights connection string set for agent-coverage")
