@@ -34,10 +34,17 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
+
+# MCP Streamable HTTP enables DNS-rebinding protection by default, which 421s
+# any request whose Host header isn't localhost. Foundry agents connect via the
+# container FQDN, so that check must be off — the server is behind Azure
+# Container Apps TLS ingress and serves only public, read-only data.
+_NO_HOST_CHECK = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
 USER_AGENT = "prior-auth-medical-mcp/1.0 (+https://github.com/otey247)"
 _http = httpx.AsyncClient(
@@ -67,7 +74,7 @@ def _err(extra: dict[str, Any], exc: Exception) -> dict[str, Any]:
 # ICD-10 — NLM Clinical Tables (https://clinicaltables.nlm.nih.gov)
 # Tools: validate_code, lookup_code, search_codes, get_hierarchy
 # ---------------------------------------------------------------------------
-icd10 = FastMCP("icd10-codes", stateless_http=True, json_response=True)
+icd10 = FastMCP("icd10-codes", stateless_http=True, json_response=True, transport_security=_NO_HOST_CHECK)
 
 
 async def _nlm_search(code_type: str, terms: str, search_by: str, max_list: int) -> tuple[int, list[dict]]:
@@ -172,7 +179,7 @@ async def get_hierarchy(code_prefix: str, code_type: str = "diagnosis") -> dict[
 # Clinical trials — ClinicalTrials.gov API v2 (https://clinicaltrials.gov)
 # Tools: search_trials, get_trial_details
 # ---------------------------------------------------------------------------
-trials = FastMCP("clinical-trials", stateless_http=True, json_response=True)
+trials = FastMCP("clinical-trials", stateless_http=True, json_response=True, transport_security=_NO_HOST_CHECK)
 _CT_URL = "https://clinicaltrials.gov/api/v2/studies"
 
 
@@ -238,7 +245,7 @@ async def get_trial_details(nct_id: str) -> dict[str, Any]:
 # NPI — CMS NPPES Registry API (https://npiregistry.cms.hhs.gov)
 # Tools: npi_validate (local Luhn), npi_lookup, npi_search
 # ---------------------------------------------------------------------------
-npi = FastMCP("npi-registry", stateless_http=True, json_response=True)
+npi = FastMCP("npi-registry", stateless_http=True, json_response=True, transport_security=_NO_HOST_CHECK)
 _NPI_URL = "https://npiregistry.cms.hhs.gov/api/"
 
 
@@ -355,7 +362,7 @@ async def npi_search(
 # Tools: search_national_coverage, search_local_coverage,
 #        get_coverage_document, get_contractors
 # ---------------------------------------------------------------------------
-cms = FastMCP("cms-coverage", stateless_http=True, json_response=True)
+cms = FastMCP("cms-coverage", stateless_http=True, json_response=True, transport_security=_NO_HOST_CHECK)
 _CMS = "https://api.coverage.cms.gov/v1"
 _MCD_VIEW = "https://www.cms.gov/medicare-coverage-database/view"
 
