@@ -26,6 +26,36 @@ The backend logs show an auth error when trying to invoke a hosted agent.
 
 ---
 
+## Clinical / Coverage agents return HTTP 500 (empty body) on runtime smoke test
+
+`scripts/check_agents.py --runtime` shows `clinical-reviewer-agent` and
+`coverage-assessment-agent` failing with `HTTP 500 ... (empty response body)`
+while `compliance-agent` and `synthesis-agent` pass.
+
+**Cause:** The two failing agents are the only ones with MCP tools. Their MCP
+servers were hosted on `mcp.deepsense.ai`, which was retired and now returns
+**NXDOMAIN** (verify: `nslookup mcp.deepsense.ai 8.8.8.8`). The MCP
+connect/list-tools phase runs inside `agent.run()` and was not covered by the
+`_SafeMCPTool.call_tool()` wrappers, so the dead-host connection error
+propagated uncaught and the agentserver returned a 500.
+
+**Fix (applied):**
+
+1. **Replacement MCP server** — `mcp-servers/medical-data` self-hosts ICD-10,
+   clinical-trials, NPI and CMS-coverage tools over public APIs. It is built and
+   wired by `azd up`; `scripts/register_agents.py` repoints the agents via the
+   `MEDICAL_MCP_BASE_URL` output. See
+   [mcp-servers/medical-data/README.md](../mcp-servers/medical-data/README.md).
+2. **Resilience** — each agent's `main.py` now probes MCP host reachability at
+   startup (drops dead tools) and wraps the run handler so any MCP outage
+   degrades to a valid HTTP 200 manual-review result instead of a 500.
+
+If you still see 500s: confirm `MEDICAL_MCP_BASE_URL` is set
+(`azd env get-value MEDICAL_MCP_BASE_URL`) and the agent images were rebuilt
+after the fix (check the image tag in `az cognitiveservices agent show`).
+
+---
+
 ## PubMed MCP: "Session terminated" / search_articles Fails
 
 PubMed literature search fails with `search_articles: PubMed search failed` but

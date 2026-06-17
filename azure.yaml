@@ -682,13 +682,24 @@ hooks:
         if ($synthesisExit -ne 0) { Write-Host "  ERROR: agent-synthesis build failed!" -ForegroundColor Red; exit 1 }
         Write-Host "  agent-synthesis image built successfully" -ForegroundColor Green
 
+        $ErrorActionPreference = 'SilentlyContinue'
+        az acr build --registry $acrName --image "mcp-medical-data:$imageTag" --platform linux/amd64 ./mcp-servers/medical-data --no-logs 2>&1 | Out-Null
+        $mcpExit = $LASTEXITCODE
+        $ErrorActionPreference = 'Continue'
+        if ($mcpExit -ne 0) { Write-Host "  ERROR: mcp-medical-data build failed!" -ForegroundColor Red; exit 1 }
+        Write-Host "  mcp-medical-data image built successfully" -ForegroundColor Green
+
         Write-Host ""
         Write-Host "  Updating container apps with new images..." -ForegroundColor White
         $ErrorActionPreference = 'SilentlyContinue'
         az containerapp update --name $backendApp  --resource-group $rgName --image "$acrEndpoint/backend:$imageTag"  --output none 2>&1 | Out-Null
         az containerapp update --name $frontendApp --resource-group $rgName --image "$acrEndpoint/frontend:$imageTag" --output none 2>&1 | Out-Null
+        $mcpApp = azd env get-value MCP_CONTAINER_APP_NAME 2>$null
+        if ($mcpApp -and $mcpApp -notmatch "ERROR") {
+            az containerapp update --name $mcpApp --resource-group $rgName --image "$acrEndpoint/mcp-medical-data:$imageTag" --output none 2>&1 | Out-Null
+        }
         $ErrorActionPreference = 'Continue'
-        Write-Host "  Backend and frontend container apps updated" -ForegroundColor Green
+        Write-Host "  Backend, frontend and MCP container apps updated" -ForegroundColor Green
 
         # Ensure the deployer and backend managed identity have Foundry User on the
         # Foundry account + project. Use role ID because Azure AI User / Foundry User
@@ -789,6 +800,10 @@ hooks:
         $env:AZURE_OPENAI_DEPLOYMENT_NAME = $deploymentName
         $env:IMAGE_TAG = $imageTag
         if ($appInsightsCs) { $env:APPLICATION_INSIGHTS_CONNECTION_STRING = $appInsightsCs }
+        # Self-hosted medical-data MCP server base URL (bicep output) — repoints
+        # the clinical/coverage agents off the retired mcp.deepsense.ai host.
+        $mcpBaseUrl = azd env get-value MEDICAL_MCP_BASE_URL 2>$null
+        if ($mcpBaseUrl -and $mcpBaseUrl -notmatch "ERROR") { $env:MEDICAL_MCP_BASE_URL = $mcpBaseUrl }
 
         # If the role was newly assigned, retry registration to allow RBAC propagation
         $maxAttempts = if ($roleIsNew) { 12 } else { 1 }
@@ -907,10 +922,18 @@ hooks:
         if [ $? -ne 0 ]; then printf "${Red}  ERROR: agent-synthesis build failed! Re-run: az acr build --registry %s --image agent-synthesis:$IMAGE_TAG --platform linux/amd64 ./agents/synthesis${NC}\n" "$ACR_NAME"; exit 1; fi
         printf "${Green}  agent-synthesis image built successfully${NC}\n"
 
+        printf "${White}  Building mcp-medical-data on ACR (%s)...${NC}\n" "$ACR_NAME"
+        az acr build --registry "$ACR_NAME" --image "mcp-medical-data:$IMAGE_TAG" --platform linux/amd64 ./mcp-servers/medical-data --no-logs
+        if [ $? -ne 0 ]; then printf "${Red}  ERROR: mcp-medical-data build failed! Re-run: az acr build --registry %s --image mcp-medical-data:$IMAGE_TAG --platform linux/amd64 ./mcp-servers/medical-data${NC}\n" "$ACR_NAME"; exit 1; fi
+        printf "${Green}  mcp-medical-data image built successfully${NC}\n"
+
         printf "\n${White}  Updating container apps with new images...${NC}\n"
         az containerapp update --name "$BACKEND_APP"  --resource-group "$RG_NAME" --image "$ACR_ENDPOINT/backend:$IMAGE_TAG"  --output none 2>/dev/null
         az containerapp update --name "$FRONTEND_APP" --resource-group "$RG_NAME" --image "$ACR_ENDPOINT/frontend:$IMAGE_TAG" --output none 2>/dev/null
-        printf "${Green}  Backend and frontend container apps updated${NC}\n"
+        MCP_APP=$(azd env get-value MCP_CONTAINER_APP_NAME 2>/dev/null || true)
+        case "$MCP_APP" in *ERROR*|"" ) MCP_APP="" ;; esac
+        [ -n "$MCP_APP" ] && az containerapp update --name "$MCP_APP" --resource-group "$RG_NAME" --image "$ACR_ENDPOINT/mcp-medical-data:$IMAGE_TAG" --output none 2>/dev/null
+        printf "${Green}  Backend, frontend and MCP container apps updated${NC}\n"
 
         # Ensure the deployer and backend managed identity have Foundry User on the
         # Foundry account + project. Use role ID because Azure AI User / Foundry User
@@ -1015,6 +1038,11 @@ hooks:
         export AZURE_OPENAI_DEPLOYMENT_NAME="$DEPLOYMENT_NAME"
         export IMAGE_TAG="$IMAGE_TAG"
         [ -n "$APP_INSIGHTS_CS" ] && export APPLICATION_INSIGHTS_CONNECTION_STRING="$APP_INSIGHTS_CS"
+        # Self-hosted medical-data MCP server base URL (bicep output) — repoints
+        # the clinical/coverage agents off the retired mcp.deepsense.ai host.
+        MEDICAL_MCP_BASE_URL=$(azd env get-value MEDICAL_MCP_BASE_URL 2>/dev/null || true)
+        case "$MEDICAL_MCP_BASE_URL" in *ERROR*|"" ) MEDICAL_MCP_BASE_URL="" ;; esac
+        [ -n "$MEDICAL_MCP_BASE_URL" ] && export MEDICAL_MCP_BASE_URL
 
         # If the role was newly assigned, retry registration to allow RBAC propagation
         MAX_ATTEMPTS=1

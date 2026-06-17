@@ -32,22 +32,8 @@ param deploymentSkuName string = 'GlobalStandard'
 @description('Whether container images have been built to ACR (set automatically by postprovision hook)')
 param imagesBuilt string = ''
 
-// ── MCP Server URL parameters (all have production defaults) ────────────────
-
-@description('ICD-10 diagnosis code validation MCP server URL')
-param mcpIcd10CodesUrl string = 'https://mcp.deepsense.ai/icd10_codes/mcp'
-
-@description('PubMed biomedical literature search MCP server URL')
-param mcpPubmedUrl string = 'https://pubmed.mcp.claude.com/mcp'
-
-@description('ClinicalTrials.gov search MCP server URL')
-param mcpClinicalTrialsUrl string = 'https://mcp.deepsense.ai/clinical_trials/mcp'
-
-@description('NPI Registry provider verification MCP server URL')
-param mcpNpiRegistryUrl string = 'https://mcp.deepsense.ai/npi_registry/mcp'
-
-@description('CMS Coverage Medicare LCD/NCD policy lookup MCP server URL')
-param mcpCmsCoverageUrl string = 'https://mcp.deepsense.ai/cms_coverage/mcp'
+// MCP server URLs are configured at agent-registration time (see
+// scripts/register_agents.py, MEDICAL_MCP_BASE_URL) — not via Bicep params.
 
 // ── Variables ───────────────────────────────────────────────────────────────
 
@@ -193,6 +179,34 @@ module frontend './modules/container-app.bicep' = {
   }
 }
 
+// ── Medical-data MCP Server Container App ────────────────────────────────────
+// Self-hosted replacement for the retired DeepSense MCP servers (mcp.deepsense.ai,
+// now NXDOMAIN). Foundry hosted agents (clinical, coverage) call it over HTTPS at
+// https://<fqdn>/<domain>/mcp. The image is built by the postprovision hook
+// (az acr build ./mcp-servers/medical-data); until then it serves a placeholder.
+
+module mcpMedicalData './modules/container-app.bicep' = {
+  name: 'mcp-medical-data'
+  scope: rg
+  params: {
+    name: '${abbrs.appContainerApps}mcp-${resourceToken}'
+    location: location
+    tags: union(tags, { 'azd-service-name': 'mcp-medical-data' })
+    containerAppsEnvironmentId: containerAppsEnv.outputs.environmentId
+    containerRegistryName: containerRegistry.outputs.name
+    containerRegistryLoginServer: containerRegistry.outputs.loginServer
+    imageName: 'mcp-medical-data'
+    targetPort: 8080
+    useAcrImage: imagesBuilt == 'true'
+    cpu: '0.5'
+    memory: '1Gi'
+    minReplicas: 1
+    env: []
+    secrets: []
+    healthCheckPath: '/health'
+  }
+}
+
 // ── Outputs ─────────────────────────────────────────────────────────────────
 
 output AZURE_RESOURCE_GROUP string = rg.name
@@ -208,3 +222,5 @@ output AZURE_OPENAI_DEPLOYMENT_NAME string = azureOpenAIDeploymentName
 output APPLICATION_INSIGHTS_CONNECTION_STRING string = monitoring.outputs.appInsightsConnectionString
 output frontendUrl string = frontend.outputs.fqdn
 output backendUrl string = backend.outputs.fqdn
+output MCP_CONTAINER_APP_NAME string = mcpMedicalData.outputs.name
+output MEDICAL_MCP_BASE_URL string = 'https://${mcpMedicalData.outputs.fqdn}'

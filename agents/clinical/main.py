@@ -14,8 +14,10 @@ import inspect
 import json
 import logging
 import os
+import socket
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from agent_framework import MCPStreamableHTTPTool, SkillsProvider
@@ -58,6 +60,60 @@ def _mcp_warning(tool_label: str, tool_name: str, exc: Exception) -> str:
                 f"{tool_label} MCP tool unavailable during hosted-agent runtime: "
                 f"{detail}. Continue with conservative manual-review findings."
             ),
+        }
+    )
+
+
+def _host_reachable(url: str, timeout: float = 3.0) -> bool:
+    """Quick DNS + TCP probe so we never attach an unreachable MCP server.
+
+    The MCP connect/list-tools phase runs inside agent.run() and is *not*
+    covered by the call_tool() wrappers below. A dead host (e.g. NXDOMAIN)
+    there would propagate uncaught and crash the request with HTTP 500.
+    Probing at startup lets us drop dead tools and serve a degraded-but-200
+    response instead.
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            return False
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError as exc:
+        logger.warning("MCP host unreachable, skipping tool: %s (%s)", url, exc)
+        return False
+
+
+def _degraded_clinical_result(detail: str) -> str:
+    """Schema-valid ClinicalResult emitted when the agent run cannot complete.
+
+    Keeps the hosted agent returning HTTP 200 with a conservative manual-review
+    payload instead of a 500 when the model call or MCP connect phase fails.
+    """
+    return json.dumps(
+        {
+            "agent_name": "Clinical Reviewer Agent",
+            "checks_performed": [],
+            "diagnosis_validation": [],
+            "procedure_validation": [],
+            "clinical_extraction": None,
+            "literature_support": [],
+            "clinical_trials": [],
+            "clinical_summary": (
+                "Automated clinical review could not complete because one or more "
+                "external tools or the model call were unavailable. Route to manual "
+                "clinical review."
+            ),
+            "tool_results": [
+                {
+                    "tool_name": "clinical-tools",
+                    "status": "warning",
+                    "detail": f"Agent run degraded: {detail[:500]}",
+                }
+            ],
+            "error": f"degraded: {detail[:500]}",
         }
     )
 
@@ -187,6 +243,20 @@ def main() -> None:
         load_prompts=False,
     )
 
+    # Drop MCP servers whose host is unreachable so the unguarded connect/
+    # list-tools phase inside agent.run() can't crash the request with a 500.
+    candidate_tools = [
+        (icd10_tool, os.environ["MCP_ICD10_CODES"]),
+        (pubmed_tool, os.environ["MCP_PUBMED"]),
+        (trials_tool, os.environ["MCP_CLINICAL_TRIALS"]),
+    ]
+    tools = []
+    for tool, url in candidate_tools:
+        if _host_reachable(url):
+            tools.append(tool)
+        else:
+            print(f"[mcp] {tool.name} unreachable ({url}) — running without it")
+
     # --- Skills from local directory ---
     skills_provider = SkillsProvider(
         skill_paths=str(Path(__file__).parent / "skills")
@@ -208,7 +278,7 @@ def main() -> None:
             "indicators with confidence scoring, search supporting literature, and "
             "check for relevant clinical trials."
         ),
-        tools=[icd10_tool, pubmed_tool, trials_tool],
+        tools=tools,
         context_providers=[skills_provider],
         default_options={"response_format": ClinicalResult},
     )
@@ -224,7 +294,11 @@ def main() -> None:
         cancellation_signal,
     ):
         input_text = await _extract_input_text(request, context)
-        output_text = await _run_agent_for_responses(agent, input_text)
+        try:
+            output_text = await _run_agent_for_responses(agent, input_text)
+        except Exception as exc:  # noqa: BLE001 — never surface a 500 to Foundry
+            logger.exception("Clinical agent run failed; returning degraded fallback")
+            output_text = _degraded_clinical_result(str(exc))
         return TextResponse(context, request, text=output_text)
 
     app.run()

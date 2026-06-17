@@ -223,12 +223,25 @@ def _build_hosted_agent_definition(
 # DeepSense servers require a custom User-Agent header (without it they return
 # a 301 redirect). PubMed (Anthropic) works without authentication.
 # ---------------------------------------------------------------------------
+# Self-hosted medical-data MCP server base URL (replaces the retired
+# mcp.deepsense.ai host, now NXDOMAIN). azd injects MEDICAL_MCP_BASE_URL from
+# the mcp-medical-data container app FQDN (see infra/main.bicep). When unset,
+# the legacy DeepSense URLs are used as a fallback — but that host is dead, so
+# set MEDICAL_MCP_BASE_URL. PubMed (Anthropic) is unaffected and stays as-is.
+_MEDICAL_MCP_BASE = (os.environ.get("MEDICAL_MCP_BASE_URL", "") or "").strip().rstrip("/")
+
+
+def _medical_mcp_url(path: str, legacy: str) -> str:
+    """Self-hosted MCP URL for a domain path, or the legacy DeepSense URL."""
+    return f"{_MEDICAL_MCP_BASE}/{path}/mcp" if _MEDICAL_MCP_BASE else legacy
+
+
 MCP_CONNECTIONS = [
     {
         "name": "icd10",
-        "url": "https://mcp.deepsense.ai/icd10_codes/mcp",
-        "auth": "CustomKeys",
-        "keys": {"User-Agent": "claude-code/1.0"},
+        "url": _medical_mcp_url("icd10", "https://mcp.deepsense.ai/icd10_codes/mcp"),
+        "auth": "None",
+        "keys": {},
     },
     {
         "name": "pubmed",
@@ -238,21 +251,21 @@ MCP_CONNECTIONS = [
     },
     {
         "name": "clinical-trials",
-        "url": "https://mcp.deepsense.ai/clinical_trials/mcp",
-        "auth": "CustomKeys",
-        "keys": {"User-Agent": "claude-code/1.0"},
+        "url": _medical_mcp_url("clinical_trials", "https://mcp.deepsense.ai/clinical_trials/mcp"),
+        "auth": "None",
+        "keys": {},
     },
     {
         "name": "npi-registry",
-        "url": "https://mcp.deepsense.ai/npi_registry/mcp",
-        "auth": "CustomKeys",
-        "keys": {"User-Agent": "claude-code/1.0"},
+        "url": _medical_mcp_url("npi", "https://mcp.deepsense.ai/npi_registry/mcp"),
+        "auth": "None",
+        "keys": {},
     },
     {
         "name": "cms-coverage",
-        "url": "https://mcp.deepsense.ai/cms_coverage/mcp",
-        "auth": "CustomKeys",
-        "keys": {"User-Agent": "claude-code/1.0"},
+        "url": _medical_mcp_url("cms_coverage", "https://mcp.deepsense.ai/cms_coverage/mcp"),
+        "auth": "None",
+        "keys": {},
     },
 ]
 
@@ -457,11 +470,17 @@ def run() -> None:
         per_call_policies=[_FoundryPreviewPolicy()],
     )
 
-    mcp_icd10 = "https://mcp.deepsense.ai/icd10_codes/mcp"
+    mcp_icd10 = _medical_mcp_url("icd10", "https://mcp.deepsense.ai/icd10_codes/mcp")
     mcp_pubmed = "https://pubmed.mcp.claude.com/mcp"
-    mcp_trials = "https://mcp.deepsense.ai/clinical_trials/mcp"
-    mcp_npi = "https://mcp.deepsense.ai/npi_registry/mcp"
-    mcp_cms = "https://mcp.deepsense.ai/cms_coverage/mcp"
+    mcp_trials = _medical_mcp_url("clinical_trials", "https://mcp.deepsense.ai/clinical_trials/mcp")
+    mcp_npi = _medical_mcp_url("npi", "https://mcp.deepsense.ai/npi_registry/mcp")
+    mcp_cms = _medical_mcp_url("cms_coverage", "https://mcp.deepsense.ai/cms_coverage/mcp")
+    if not _MEDICAL_MCP_BASE:
+        print(
+            "  WARN: MEDICAL_MCP_BASE_URL not set — ICD10/trials/NPI/CMS MCP tools "
+            "point at the retired mcp.deepsense.ai host and will be unreachable. "
+            "Deploy mcp-medical-data and set MEDICAL_MCP_BASE_URL."
+        )
 
     agents = [
         {

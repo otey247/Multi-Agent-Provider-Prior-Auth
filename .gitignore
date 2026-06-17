@@ -41,3 +41,4 @@ docs/*.pptx
 
 # Coding Agents
 .codex/
+.claude/
