@@ -5,10 +5,12 @@ scoring, searches PubMed literature and ClinicalTrials.gov, and returns
 a structured clinical profile for downstream coverage assessment.
 
 Deployed as a Foundry Hosted Agent via azure.ai.agentserver.
-MCP tools are wired via MCPStreamableHTTPTool in this container, with Foundry
-MCPTool connections registered for proxy routing (see scripts/register_agents.py).
-Structured output enforced via default_options={"response_format": ClinicalResult},
-which is passed through to every agent.run() call.
+MCP tools are consumed through a Foundry Toolbox (clinical-tools): hosted agents
+can reach the Foundry project domain but NOT arbitrary public internet, so the
+toolbox proxies out to the medical-data MCP servers from Foundry's own network
+(see scripts/create_toolbox.py and the TOOLBOX_ENDPOINT env set by
+scripts/register_agents.py). Structured output enforced via
+default_options={"response_format": ClinicalResult}.
 """
 import asyncio
 import contextlib
@@ -31,7 +33,7 @@ from azure.ai.agentserver.responses import (
     ResponsesAgentServerHost,
     TextResponse,
 )
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
 from mcp.shared.exceptions import McpError
 
@@ -42,11 +44,35 @@ load_dotenv(override=True)  # override=True required for Foundry-deployed env va
 logger = logging.getLogger(__name__)
 
 
-# DeepSense CloudFront routes on User-Agent — without this header the server
-# returns a 301 redirect to the docs site instead of handling MCP messages.
-_MCP_HTTP_CLIENT = httpx.AsyncClient(
-    headers={"User-Agent": "claude-code/1.0"},
-    timeout=httpx.Timeout(60.0),
+# Shared Azure credential (managed identity in hosted runtime, az CLI locally).
+_CREDENTIAL = DefaultAzureCredential()
+
+
+class _ToolboxAuth(httpx.Auth):
+    """Inject the Foundry bearer token + preview header on every toolbox request.
+
+    Hosted Foundry agents can reach the Foundry project domain but NOT arbitrary
+    public internet, so MCP tools are consumed through a Foundry Toolbox endpoint
+    (on the project domain) that proxies out to the real MCP servers. Every
+    request needs an AAD bearer token (scope https://ai.azure.com/.default) and
+    the Toolboxes preview feature header.
+    """
+
+    def __init__(self, token_provider):
+        self._token_provider = token_provider
+
+    def auth_flow(self, request):
+        request.headers["Authorization"] = f"Bearer {self._token_provider()}"
+        request.headers["Foundry-Features"] = "Toolboxes=V1Preview"
+        yield request
+
+
+# Reused across requests; the per-request toolbox tool instance wraps it.
+_TOOLBOX_HTTP_CLIENT = httpx.AsyncClient(
+    auth=_ToolboxAuth(
+        get_bearer_token_provider(_CREDENTIAL, "https://ai.azure.com/.default")
+    ),
+    timeout=httpx.Timeout(120.0),
 )
 
 
@@ -67,13 +93,10 @@ def _mcp_warning(tool_label: str, tool_name: str, exc: Exception) -> str:
 
 
 def _host_reachable(url: str, timeout: float = 3.0) -> bool:
-    """Quick DNS + TCP probe so we never attach an unreachable MCP server.
+    """Quick DNS + TCP probe so we never attach an unreachable toolbox endpoint.
 
-    The MCP connect/list-tools phase runs inside agent.run() and is *not*
-    covered by the call_tool() wrappers below. A dead host (e.g. NXDOMAIN)
-    there would propagate uncaught and crash the request with HTTP 500.
-    Probing at startup lets us drop dead tools and serve a degraded-but-200
-    response instead.
+    If the toolbox host can't be reached at startup we run tool-less and let the
+    handler degrade to a schema-valid HTTP 200 rather than hanging into a 500.
     """
     try:
         parsed = urlparse(url)
@@ -84,7 +107,7 @@ def _host_reachable(url: str, timeout: float = 3.0) -> bool:
         with socket.create_connection((host, port), timeout=timeout):
             return True
     except OSError as exc:
-        logger.warning("MCP host unreachable, skipping tool: %s (%s)", url, exc)
+        logger.warning("Toolbox host unreachable: %s (%s)", url, exc)
         return False
 
 
@@ -92,7 +115,7 @@ def _degraded_clinical_result(detail: str) -> str:
     """Schema-valid ClinicalResult emitted when the agent run cannot complete.
 
     Keeps the hosted agent returning HTTP 200 with a conservative manual-review
-    payload instead of a 500 when the model call or MCP connect phase fails.
+    payload instead of a 500 when the model call or MCP tools fail.
     """
     return json.dumps(
         {
@@ -120,46 +143,33 @@ def _degraded_clinical_result(detail: str) -> str:
     )
 
 
-class _SafeMCPTool(MCPStreamableHTTPTool):
-    """MCP tool wrapper that returns warnings instead of raising runtime 500s."""
+class _ToolboxMCPTool(MCPStreamableHTTPTool):
+    """Toolbox MCP tool that reconnects on session expiry and degrades on error.
 
-    async def call_tool(self, tool_name: str, **kwargs) -> str:
-        try:
-            return await super().call_tool(tool_name, **kwargs)
-        except Exception as exc:
-            logger.exception("MCP tool %s.%s failed", self.name, tool_name)
-            return _mcp_warning(self.name, tool_name, exc)
-
-
-class _ReconnectingMCPTool(MCPStreamableHTTPTool):
-    """MCPStreamableHTTPTool that auto-reconnects on expired MCP sessions.
-
-    PubMed's MCP server (pubmed.mcp.claude.com) terminates idle sessions
-    after ~10 minutes. The base class retries on ClosedResourceError (TCP
-    disconnect) but not on McpError('Session terminated') (MCP-level session
-    expiry). This subclass catches both and reconnects once.
+    Returns a structured warning instead of raising so an upstream tool failure
+    never crashes the hosted agent run. Reconnects once on MCP 'Session
+    terminated' (idle toolbox sessions are reaped server-side).
     """
 
     async def call_tool(self, tool_name: str, **kwargs) -> str:
         try:
             return await super().call_tool(tool_name, **kwargs)
         except ToolExecutionException as exc:
-            if exc.__cause__ and isinstance(exc.__cause__, McpError) and "Session terminated" in str(exc.__cause__):
-                logger.info(
-                    "MCP session expired for %s. Reconnecting...", self.name
-                )
+            cause = exc.__cause__
+            if isinstance(cause, McpError) and "Session terminated" in str(cause):
+                logger.info("Toolbox MCP session expired for %s; reconnecting", self.name)
                 try:
                     await self.connect(reset=True)
                     return await super().call_tool(tool_name, **kwargs)
-                except Exception as retry_exc:
+                except Exception as retry_exc:  # noqa: BLE001
                     logger.exception(
-                        "MCP tool %s.%s failed after reconnect",
-                        self.name,
-                        tool_name,
+                        "Toolbox tool %s.%s failed after reconnect", self.name, tool_name
                     )
                     return _mcp_warning(self.name, tool_name, retry_exc)
-
-            logger.exception("MCP tool %s.%s failed", self.name, tool_name)
+            logger.exception("Toolbox tool %s.%s failed", self.name, tool_name)
+            return _mcp_warning(self.name, tool_name, exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Toolbox tool %s.%s failed", self.name, tool_name)
             return _mcp_warning(self.name, tool_name, exc)
 
 
@@ -220,28 +230,22 @@ def main() -> None:
         print("[observability] APPLICATION_INSIGHTS_CONNECTION_STRING not set — telemetry disabled")
     os.environ.setdefault("OTEL_SERVICE_NAME", "agent-clinical")
 
-    # --- MCP tool specs ---
-    # Tool INSTANCES are created per request (see handler) so each MCP
-    # streamable-HTTP connection is opened and closed in the SAME asyncio task.
-    # Module-level singletons get connected/cleaned-up across tasks by the
-    # framework/GC, which raises anyio's "Attempted to exit cancel scope in a
-    # different task" (a BaseExceptionGroup) on teardown — harmless locally but
-    # fatal (HTTP 500) in the hosted agentserver.
-    mcp_specs = [
-        ("icd10-codes", "Validate and look up ICD-10 diagnosis and procedure codes",
-         os.environ["MCP_ICD10_CODES"], _SafeMCPTool),
-        ("pubmed", "Search biomedical literature on PubMed",
-         os.environ["MCP_PUBMED"], _ReconnectingMCPTool),
-        ("clinical-trials", "Search ClinicalTrials.gov for relevant trials",
-         os.environ["MCP_CLINICAL_TRIALS"], _SafeMCPTool),
-    ]
-    # Drop unreachable MCP servers once at startup.
-    reachable_specs = []
-    for name, description, url, tool_cls in mcp_specs:
-        if _host_reachable(url):
-            reachable_specs.append((name, description, url, tool_cls))
+    # --- Foundry Toolbox endpoint ---
+    # Hosted agents reach the Foundry project domain but not arbitrary public
+    # internet, so ICD-10/PubMed/ClinicalTrials MCP tools are consumed through the
+    # clinical-tools toolbox. The toolbox tool INSTANCE is created per request
+    # (see handler) so its streamable-HTTP connection is opened and closed in the
+    # SAME asyncio task — a module-level singleton gets torn down across tasks by
+    # the framework/GC, raising anyio "exit cancel scope in a different task".
+    toolbox_endpoint = (os.environ.get("TOOLBOX_ENDPOINT", "") or "").strip()
+    if toolbox_endpoint and _host_reachable(toolbox_endpoint):
+        print(f"[toolbox] using {toolbox_endpoint}")
+    else:
+        if toolbox_endpoint:
+            print(f"[toolbox] {toolbox_endpoint} unreachable — running without tools")
         else:
-            print(f"[mcp] {name} unreachable ({url}) — running without it")
+            print("[toolbox] TOOLBOX_ENDPOINT not set — running without tools")
+        toolbox_endpoint = ""
 
     # --- Skills from local directory ---
     skills_provider = SkillsProvider(
@@ -252,14 +256,17 @@ def main() -> None:
     chat_client = AzureOpenAIResponsesClient(
         project_endpoint=os.environ["AZURE_AI_PROJECT_ENDPOINT"],
         deployment_name=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
-        credential=DefaultAzureCredential(),
+        credential=_CREDENTIAL,
     )
 
     _INSTRUCTIONS = (
         "You are a Clinical Reviewer Agent for prior authorization requests. "
         "Use your clinical-review skill to validate ICD-10 codes, extract clinical "
         "indicators with confidence scoring, search supporting literature, and "
-        "check for relevant clinical trials."
+        "check for relevant clinical trials. The toolbox exposes the ICD-10, PubMed "
+        "and ClinicalTrials tools named '<server>___<tool>' "
+        "(e.g. icd10___validate_code, pubmed___search_articles, "
+        "clinical_trials___search_trials)."
     )
 
     # --- Serve as HTTP endpoint for Foundry hosting ---
@@ -274,19 +281,22 @@ def main() -> None:
     ):
         input_text = await _extract_input_text(request, context)
         try:
-            # Connect MCP tools inside THIS request task and close them here too.
+            # Connect the toolbox tool inside THIS request task and close it here.
             async with contextlib.AsyncExitStack() as stack:
                 tools = []
-                for name, description, url, tool_cls in reachable_specs:
-                    tool = tool_cls(
-                        name=name,
-                        description=description,
-                        url=url,
-                        http_client=_MCP_HTTP_CLIENT,
+                if toolbox_endpoint:
+                    toolbox = _ToolboxMCPTool(
+                        name="clinical-tools",
+                        description=(
+                            "Foundry toolbox proxying ICD-10, PubMed and "
+                            "ClinicalTrials.gov MCP tools"
+                        ),
+                        url=toolbox_endpoint,
+                        http_client=_TOOLBOX_HTTP_CLIENT,
                         load_prompts=False,
                     )
-                    await stack.enter_async_context(tool)
-                    tools.append(tool)
+                    await stack.enter_async_context(toolbox)
+                    tools.append(toolbox)
                 # default_options enforces ClinicalResult schema (token-level JSON).
                 agent = chat_client.as_agent(
                     name="clinical-reviewer-agent",

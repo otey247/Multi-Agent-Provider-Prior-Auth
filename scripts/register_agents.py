@@ -466,6 +466,14 @@ def run() -> None:
     mcp_trials = _medical_mcp_url("clinical_trials", "https://mcp.deepsense.ai/clinical_trials/mcp")
     mcp_npi = _medical_mcp_url("npi", "https://mcp.deepsense.ai/npi_registry/mcp")
     mcp_cms = _medical_mcp_url("cms_coverage", "https://mcp.deepsense.ai/cms_coverage/mcp")
+
+    # Foundry Toolbox endpoints. Hosted agents can reach the Foundry project domain
+    # but NOT arbitrary public internet, so the clinical/coverage agents consume the
+    # medical-data MCP servers through these toolboxes (created by
+    # scripts/create_toolbox.py) which Foundry proxies out to the real servers. The
+    # MCP_* values above are what the toolboxes themselves point at.
+    toolbox_clinical = f"{project_endpoint}/toolboxes/clinical-tools/mcp?api-version=v1"
+    toolbox_coverage = f"{project_endpoint}/toolboxes/coverage-tools/mcp?api-version=v1"
     if not _MEDICAL_MCP_BASE:
         print(
             "  WARN: MEDICAL_MCP_BASE_URL not set — ICD10/trials/NPI/CMS MCP tools "
@@ -489,6 +497,7 @@ def run() -> None:
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
                 "MONITORING_CONNECTION_STRING": app_insights_cs,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": model_name,
+                "TOOLBOX_ENDPOINT": toolbox_clinical,
                 "MCP_ICD10_CODES": mcp_icd10,
                 "MCP_PUBMED": mcp_pubmed,
                 "MCP_CLINICAL_TRIALS": mcp_trials,
@@ -510,6 +519,7 @@ def run() -> None:
                 "AZURE_AI_PROJECT_ENDPOINT": project_endpoint,
                 "MONITORING_CONNECTION_STRING": app_insights_cs,
                 "AZURE_OPENAI_DEPLOYMENT_NAME": model_name,
+                "TOOLBOX_ENDPOINT": toolbox_coverage,
                 "MCP_NPI_REGISTRY": mcp_npi,
                 "MCP_CMS_COVERAGE": mcp_cms,
             },
