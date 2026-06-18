@@ -177,10 +177,8 @@ def main() -> None:
             async with AsyncOpenAI(base_url=base_url, api_key=token) as client:
                 resp = await client.responses.parse(
                     model=deployment,
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": input_text},
-                    ],
+                    instructions=system_prompt,
+                    input=[{"role": "user", "content": input_text}],
                     tools=mcp_tools,
                     text_format=ClinicalResult,
                 )
