@@ -173,8 +173,26 @@ def main() -> None:
     ):
         input_text = await _extract_input_text(request, context)
         try:
+            # DIAGNOSTIC: staged probes to localize the hosted empty-500. Send a
+            # payload containing PING1..PING4 to test each stage; default = full.
+            if "PING1" in input_text:  # handler reached at all?
+                return TextResponse(context, request, text=json.dumps({"diag": "PING1 handler-ok"}))
             token = (await _CREDENTIAL.get_token(_TOKEN_SCOPE)).token
+            if "PING2" in input_text:  # managed-identity token?
+                return TextResponse(context, request, text=json.dumps({"diag": "PING2 token-ok", "len": len(token)}))
             async with AsyncOpenAI(base_url=base_url, api_key=token) as client:
+                if "PING3" in input_text:  # plain model call (no tools, no schema)?
+                    r = await client.responses.create(model=deployment, input="Reply with the single word OK.")
+                    return TextResponse(context, request, text=json.dumps({"diag": "PING3 plaincall-ok", "text": (r.output_text or "")[:80]}))
+                if "PING4" in input_text:  # structured output, NO tools?
+                    r = await client.responses.parse(
+                        model=deployment,
+                        instructions="Return a ClinicalResult for this request.",
+                        input=[{"role": "user", "content": input_text}],
+                        text_format=ClinicalResult,
+                    )
+                    return TextResponse(context, request, text=json.dumps({"diag": "PING4 structured-notools-ok", "parsed": r.output_parsed is not None}))
+                # default: full path (structured output + server-side mcp tools)
                 resp = await client.responses.parse(
                     model=deployment,
                     instructions=system_prompt,
@@ -187,7 +205,7 @@ def main() -> None:
             raise
         except BaseException as exc:  # noqa: BLE001 — never 500 to Foundry
             logger.exception("Clinical agent run failed; returning degraded fallback")
-            output_text = _degraded_clinical_result(str(exc))
+            output_text = json.dumps({"diag": "ERR", "err": type(exc).__name__, "detail": str(exc)[:500]})
         return TextResponse(context, request, text=output_text)
 
     app.run()
