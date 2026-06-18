@@ -567,34 +567,6 @@ def run() -> None:
         },
     ]
 
-    # DIAGNOSTIC (set STRIP_TOOL_ENV=1): drop the MCP/toolbox env vars from
-    # clinical/coverage to test whether they are what makes the hosted platform
-    # refuse to serve those two agents (the only registration difference vs the
-    # working compliance/synthesis agents).
-    if os.environ.get("STRIP_TOOL_ENV"):
-        _tool_keys = (
-            "MCP_ICD10_CODES", "MCP_PUBMED", "MCP_CLINICAL_TRIALS",
-            "MCP_NPI_REGISTRY", "MCP_CMS_COVERAGE", "TOOLBOX_ENDPOINT",
-        )
-        for _a in agents:
-            if _a["name"] in ("clinical-reviewer-agent", "coverage-assessment-agent"):
-                for _k in _tool_keys:
-                    _a["env"].pop(_k, None)
-                print(f"  [STRIP_TOOL_ENV] removed tool env from {_a['name']}")
-
-    # DIAGNOSTIC (set ADD_V2_AGENTS=1): clone clinical/coverage under new names with
-    # the SAME image+config, to separate an agent-identity/name issue (clones serve)
-    # from an image issue (clones also 500).
-    if os.environ.get("ADD_V2_AGENTS"):
-        import copy as _copy
-        for _base in ("clinical-reviewer-agent", "coverage-assessment-agent"):
-            _orig = next((a for a in agents if a["name"] == _base), None)
-            if _orig:
-                _dup = _copy.deepcopy(_orig)
-                _dup["name"] = _base + "-v2"
-                agents.append(_dup)
-                print(f"  [ADD_V2_AGENTS] added {_dup['name']}")
-
     print()
     for agent_def in agents:
         name = agent_def["name"]
