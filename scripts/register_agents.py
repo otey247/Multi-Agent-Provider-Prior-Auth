@@ -567,6 +567,21 @@ def run() -> None:
         },
     ]
 
+    # DIAGNOSTIC (set STRIP_TOOL_ENV=1): drop the MCP/toolbox env vars from
+    # clinical/coverage to test whether they are what makes the hosted platform
+    # refuse to serve those two agents (the only registration difference vs the
+    # working compliance/synthesis agents).
+    if os.environ.get("STRIP_TOOL_ENV"):
+        _tool_keys = (
+            "MCP_ICD10_CODES", "MCP_PUBMED", "MCP_CLINICAL_TRIALS",
+            "MCP_NPI_REGISTRY", "MCP_CMS_COVERAGE", "TOOLBOX_ENDPOINT",
+        )
+        for _a in agents:
+            if _a["name"] in ("clinical-reviewer-agent", "coverage-assessment-agent"):
+                for _k in _tool_keys:
+                    _a["env"].pop(_k, None)
+                print(f"  [STRIP_TOOL_ENV] removed tool env from {_a['name']}")
+
     print()
     for agent_def in agents:
         name = agent_def["name"]
