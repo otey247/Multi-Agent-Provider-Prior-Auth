@@ -582,6 +582,19 @@ def run() -> None:
                     _a["env"].pop(_k, None)
                 print(f"  [STRIP_TOOL_ENV] removed tool env from {_a['name']}")
 
+    # DIAGNOSTIC (set ADD_V2_AGENTS=1): clone clinical/coverage under new names with
+    # the SAME image+config, to separate an agent-identity/name issue (clones serve)
+    # from an image issue (clones also 500).
+    if os.environ.get("ADD_V2_AGENTS"):
+        import copy as _copy
+        for _base in ("clinical-reviewer-agent", "coverage-assessment-agent"):
+            _orig = next((a for a in agents if a["name"] == _base), None)
+            if _orig:
+                _dup = _copy.deepcopy(_orig)
+                _dup["name"] = _base + "-v2"
+                agents.append(_dup)
+                print(f"  [ADD_V2_AGENTS] added {_dup['name']}")
+
     print()
     for agent_def in agents:
         name = agent_def["name"]
