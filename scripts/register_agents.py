@@ -338,7 +338,7 @@ def run() -> None:
     image_tag = _clean_env_value(os.environ.get("IMAGE_TAG", "latest"))
     responses_protocol_version = os.environ.get(
         "HOSTED_AGENT_RESPONSES_PROTOCOL_VERSION",
-        "v0.1.1",
+        "1.0.0",  # platform requires 1.0.0; v0.1.1 is rejected ("Unsupported responses protocol version")
     )
     subscription_id = _clean_env_value(os.environ.get("AZURE_SUBSCRIPTION_ID", ""))
     resource_group = _clean_env_value(os.environ.get("AZURE_RESOURCE_GROUP", ""))
