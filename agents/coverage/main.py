@@ -24,7 +24,7 @@ from azure.ai.agentserver.responses import (
     ResponsesAgentServerHost,
     TextResponse,
 )
-from azure.identity.aio import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
@@ -185,7 +185,7 @@ def main() -> None:
     ):
         input_text = await _extract_input_text(request, context)
         try:
-            token = (await _CREDENTIAL.get_token(_TOKEN_SCOPE)).token
+            token = (await asyncio.to_thread(_CREDENTIAL.get_token, _TOKEN_SCOPE)).token
             async with AsyncOpenAI(base_url=base_url, api_key=token) as client:
                 resp = await client.responses.parse(
                     model=deployment,
