@@ -4,6 +4,7 @@ import type {
   DecisionRequest,
   DecisionResponse,
   ProgressEvent,
+  ExecutionTrace,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
@@ -34,6 +35,7 @@ export function submitReviewStream(
   onProgress: (event: ProgressEvent) => void,
   onResult: (result: ReviewResponse) => void,
   onError: (error: string) => void,
+  onTrace?: (trace: ExecutionTrace) => void,
 ): AbortController {
   const controller = new AbortController();
 
@@ -79,6 +81,8 @@ export function submitReviewStream(
                 onResult(parsed as ReviewResponse);
               } else if (eventType === "error") {
                 onError(parsed.detail || "Unknown error");
+              } else if (eventType === "trace") {
+                onTrace?.(parsed as ExecutionTrace);
               } else {
                 onProgress(parsed as ProgressEvent);
               }

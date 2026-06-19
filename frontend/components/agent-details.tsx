@@ -67,6 +67,20 @@ function statusBadge(status: string) {
   return <Badge variant={map[status] ?? "secondary"}>{status}</Badge>;
 }
 
+function perCodeStatusBadge(status: string) {
+  const map: Record<string, "success" | "destructive" | "secondary"> = {
+    covered: "success",
+    non_covered: "destructive",
+    not_listed: "secondary",
+  };
+  const label: Record<string, string> = {
+    covered: "Covered",
+    non_covered: "Non-Covered",
+    not_listed: "Not Listed",
+  };
+  return <Badge variant={map[status] ?? "secondary"}>{label[status] ?? status}</Badge>;
+}
+
 function checkIcon(result: string) {
   switch (result) {
     case "pass":
@@ -628,6 +642,7 @@ function CoverageTab({ data: raw }: { data: CoverageResult }) {
     policy_references: raw.policy_references ?? [],
     coverage_limitations: raw.coverage_limitations ?? [],
     documentation_gaps: raw.documentation_gaps ?? [],
+    per_code_coverage: raw.per_code_coverage ?? [],
     tool_results: raw.tool_results ?? [],
   };
   return (
@@ -662,6 +677,12 @@ function CoverageTab({ data: raw }: { data: CoverageResult }) {
                 <span className="font-medium">Specialty: </span>
                 {data.provider_verification.specialty}
               </div>
+              {data.provider_verification.credential && (
+                <div>
+                  <span className="font-medium">Credential: </span>
+                  {data.provider_verification.credential}
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <span className="font-medium">Status:</span>
                 {statusBadge(data.provider_verification.status)}
@@ -669,6 +690,47 @@ function CoverageTab({ data: raw }: { data: CoverageResult }) {
               <p className="text-muted-foreground">
                 {data.provider_verification.detail}
               </p>
+
+              {(data.provider_verification.taxonomies?.length ?? 0) > 0 && (
+                <div className="pt-2">
+                  <p className="font-medium mb-1 flex items-center gap-1.5">
+                    <ListChecks className="h-3.5 w-3.5 text-primary" />
+                    Taxonomies
+                  </p>
+                  <div className="overflow-x-auto rounded-lg border bg-background">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-32">Code</TableHead>
+                          <TableHead>Description</TableHead>
+                          <TableHead className="w-24">Primary</TableHead>
+                          <TableHead className="w-28">License</TableHead>
+                          <TableHead className="w-20">State</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {(data.provider_verification.taxonomies ?? []).map((t, i) => (
+                          <TableRow key={i}>
+                            <TableCell className="font-mono text-xs">{t.code}</TableCell>
+                            <TableCell>{t.desc}</TableCell>
+                            <TableCell>
+                              {t.primary ? (
+                                <Badge variant="success">Primary</Badge>
+                              ) : (
+                                <Badge variant="secondary">—</Badge>
+                              )}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">
+                              {t.license || "—"}
+                            </TableCell>
+                            <TableCell>{t.state || "—"}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
         ) : (
@@ -761,6 +823,43 @@ function CoverageTab({ data: raw }: { data: CoverageResult }) {
           </p>
         )}
       </CollapsibleSection>
+
+      {/* Per-code coverage matrix */}
+      {data.per_code_coverage.length > 0 && (
+        <CollapsibleSection
+          title={`Per-Code Coverage (${data.per_code_coverage.length} codes)`}
+          icon={FileCheck}
+          hasData={data.per_code_coverage.length > 0}
+          defaultOpen
+        >
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-28">Code</TableHead>
+                  <TableHead className="w-24">Type</TableHead>
+                  <TableHead className="w-32">Status</TableHead>
+                  <TableHead>Policy</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.per_code_coverage.map((c, i) => (
+                  <TableRow key={i}>
+                    <TableCell className="font-mono text-sm">{c.code}</TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{c.code_type}</Badge>
+                    </TableCell>
+                    <TableCell>{perCodeStatusBadge(c.status)}</TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {c.policy_id || "—"}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </CollapsibleSection>
+      )}
 
       {/* Documentation gaps */}
       {data.documentation_gaps.length > 0 && (

@@ -1,14 +1,21 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import type { ReviewResponse, DecisionResponse } from "@/lib/types";
+import type { ReviewResponse, DecisionResponse, ExecutionTrace as ExecutionTraceType } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
 import { ConfidenceBar } from "@/components/confidence-bar";
 import { AgentDetails } from "@/components/agent-details";
+import { ExecutionTrace } from "@/components/execution-trace";
 import { DecisionPanel } from "@/components/decision-panel";
 import {
   CheckCircle2,
@@ -25,13 +32,15 @@ import {
   Info,
   Download,
   FileText,
+  Activity,
 } from "lucide-react";
 
 interface ReviewDashboardProps {
   review: ReviewResponse;
+  liveTrace?: ExecutionTraceType | null;
 }
 
-export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
+export function ReviewDashboard({ review: rawReview, liveTrace }: ReviewDashboardProps) {
   // Normalize potentially-null arrays from API response
   const review = {
     ...rawReview,
@@ -81,8 +90,25 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
     }
   }
 
+  // Prefer the full trace carried on the final ReviewResponse (replay);
+  // fall back to the latest live snapshot streamed during the run.
+  const trace = review.execution_trace ?? liveTrace ?? null;
+
   return (
-    <div className="mt-8 space-y-6 animate-in fade-in-0 slide-in-from-bottom-4 duration-500">
+    <div className="mt-8 animate-in fade-in-0 slide-in-from-bottom-4 duration-500">
+      <Tabs defaultValue="assessment" className="space-y-6">
+        <TabsList>
+          <TabsTrigger value="assessment" className="flex items-center gap-1.5">
+            <ClipboardList className="h-3.5 w-3.5" />
+            Assessment
+          </TabsTrigger>
+          <TabsTrigger value="trace" className="flex items-center gap-1.5">
+            <Activity className="h-3.5 w-3.5" />
+            Execution Trace
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="assessment" className="space-y-6">
       {/* Submission readiness header */}
       <Card className="shadow-sm border-l-4 border-l-primary">
         <CardHeader>
@@ -378,6 +404,12 @@ export function ReviewDashboard({ review: rawReview }: ReviewDashboardProps) {
           </div>
         </>
       )}
+        </TabsContent>
+
+        <TabsContent value="trace">
+          <ExecutionTrace trace={trace} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

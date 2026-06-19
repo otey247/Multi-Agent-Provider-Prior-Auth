@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession
@@ -116,6 +117,7 @@ async def run_with_toolbox(
     audit reflects real executions, not the model's self-report.
     """
     tool_audit: list[dict] = []
+    run_start = time.monotonic()
     async with AsyncExitStack() as stack:
         tool_specs: list[dict] = []
         session: ClientSession | None = None
@@ -149,6 +151,8 @@ async def run_with_toolbox(
                     args = json.loads(call.arguments or "{}")
                 except (json.JSONDecodeError, TypeError):
                     args = {}
+                started_offset_ms = int((time.monotonic() - run_start) * 1000)
+                t0 = time.monotonic()
                 try:
                     result = await session.call_tool(call.name, args)
                     output = _tool_result_text(result)
@@ -157,11 +161,22 @@ async def run_with_toolbox(
                     logger.warning("Toolbox tool %s failed: %s", call.name, exc)
                     output = json.dumps({"error": f"{type(exc).__name__}: {exc}"})
                     is_error = True
-                # Authoritative audit of the call we actually executed.
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                # server_label___tool_name -> ("server_label", "tool_name")
+                label, _sep, short = (call.name or "").partition("___")
+                # Authoritative, timed audit of the call we actually executed —
+                # surfaced in the in-app Execution Trace + tool_results.
                 tool_audit.append(
                     {
                         "tool_name": call.name,
+                        "server_label": label if short else "",
+                        "tool": short or call.name,
+                        "order": len(tool_audit),
                         "status": "fail" if is_error else "pass",
+                        "duration_ms": duration_ms,
+                        "started_offset_ms": started_offset_ms,
+                        "args_summary": (json.dumps(args) if args else "")[:300],
+                        "result_summary": output[:500],
                         "detail": (
                             f"{call.name} failed: {output[:300]}"
                             if is_error

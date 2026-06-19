@@ -101,12 +101,29 @@ export interface ClinicalResult {
   error?: string;
 }
 
+export interface TaxonomyDetail {
+  code: string;
+  desc: string;
+  primary: boolean;
+  license: string;
+  state: string;
+}
+
 export interface ProviderVerification {
   npi: string;
   name: string;
   specialty: string;
   status: "active" | "inactive" | "not_found";
   detail: string;
+  credential?: string;
+  taxonomies?: TaxonomyDetail[];
+}
+
+export interface PerCodeCoverage {
+  code: string;
+  code_type: "ICD10" | "HCPCS";
+  status: "covered" | "non_covered" | "not_listed";
+  policy_id: string;
 }
 
 export interface CoveragePolicy {
@@ -143,6 +160,7 @@ export interface CoverageResult {
   policy_references: string[];
   coverage_limitations: string[];
   documentation_gaps: DocumentationGap[];
+  per_code_coverage?: PerCodeCoverage[];
   tool_results: ToolResult[];
   error?: string;
 }
@@ -168,6 +186,44 @@ export interface SynthesisAuditTrail {
   agents_consulted?: string[];
 }
 
+// --- Execution trace types (waterfall / timeline visualization) ---
+
+export interface TraceToolCall {
+  tool_name: string;
+  server_label: string;
+  tool: string;
+  status: "pass" | "fail";
+  order: number;
+  duration_ms: number;
+  started_offset_ms: number;
+  args_summary: string;
+  result_summary: string;
+}
+
+export interface TraceAgent {
+  name: string;
+  status: "done" | "warning" | "error";
+  duration_ms: number;
+  model: string;
+  tool_calls: TraceToolCall[];
+}
+
+export interface TracePhase {
+  name: PhaseId;
+  status: string;
+  started_offset_ms: number;
+  duration_ms: number;
+  agents: TraceAgent[];
+}
+
+export interface ExecutionTrace {
+  request_id: string;
+  started_at: string;
+  completed_at: string;
+  total_duration_ms: number;
+  phases: TracePhase[];
+}
+
 export interface ReviewResponse {
   request_id: string;
   recommendation: "ready_to_submit" | "needs_review" | "approve" | "pend_for_review";
@@ -189,6 +245,7 @@ export interface ReviewResponse {
   audit_trail?: AuditTrail;
   audit_justification?: string;
   audit_justification_pdf?: string;
+  execution_trace?: ExecutionTrace | null;
 }
 
 // --- Progress tracking types (SSE streaming) ---

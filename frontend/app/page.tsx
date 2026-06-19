@@ -1,20 +1,28 @@
 "use client";
 
 import { useState } from "react";
-import type { ReviewResponse } from "@/lib/types";
+import type { ReviewResponse, ExecutionTrace } from "@/lib/types";
 import { Header } from "@/components/header";
 import { UploadForm } from "@/components/upload-form";
 import { ReviewDashboard } from "@/components/review-dashboard";
 
 export default function Home() {
   const [review, setReview] = useState<ReviewResponse | null>(null);
+  const [liveTrace, setLiveTrace] = useState<ExecutionTrace | null>(null);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-info-light/50 via-background to-background">
       <main className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-12">
         <Header />
-        <UploadForm onReviewComplete={setReview} />
-        {review && <ReviewDashboard review={review} />}
+        <UploadForm
+          onReviewComplete={setReview}
+          onTrace={setLiveTrace}
+          onRunStart={() => {
+            setReview(null);
+            setLiveTrace(null);
+          }}
+        />
+        {review && <ReviewDashboard review={review} liveTrace={liveTrace} />}
       </main>
 
       <footer className="border-t mt-16 py-6">

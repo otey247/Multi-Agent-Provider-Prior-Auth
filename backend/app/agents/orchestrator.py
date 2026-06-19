@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from app.agents.compliance_agent import run_compliance_review
@@ -37,6 +38,7 @@ from app.agents.clinical_agent import run_clinical_review
 from app.agents.coverage_agent import run_coverage_review
 from app.agents.synthesis_agent import run_synthesis_review as _dispatch_synthesis
 from app.services.audit_pdf import generate_audit_justification_pdf
+from app.services.coverage_enrich import enrich_coverage
 from app.services.cpt_validation import validate_procedure_codes
 
 logger = logging.getLogger(__name__)
@@ -975,24 +977,94 @@ async def _run_review_pipeline(
 ) -> dict:
     """Inner pipeline — extracted so the top-level span wraps everything."""
     start_time = datetime.now(timezone.utc).isoformat()
+    request_id = request_data.get("request_id", "unknown")
+
+    # --- Execution-trace scaffolding (in-app technical-demo timeline) ---
+    pipeline_start = time.monotonic()
+    model_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-5.4")
+    trace_phases: list[dict] = []
+
+    def _off() -> int:
+        return int((time.monotonic() - pipeline_start) * 1000)
+
+    async def _timed(agent_name: str, fn, *args):
+        """Run an agent via _safe_run and return (result, duration_ms)."""
+        _t0 = time.monotonic()
+        result = await _safe_run(agent_name, fn, *args)
+        return result, int((time.monotonic() - _t0) * 1000)
+
+    def _trace_agent(name: str, result: dict, duration_ms: int, model: str = "") -> dict:
+        if _uses_agent_fallback(result):
+            status = "warning"
+        elif result.get("error"):
+            status = "error"
+        else:
+            status = "done"
+        calls: list[dict] = []
+        for tr in (result.get("tool_results") or []):
+            if not isinstance(tr, dict):
+                continue
+            raw = str(tr.get("status", "")).lower()
+            calls.append({
+                "tool_name": tr.get("tool_name", ""),
+                "server_label": tr.get("server_label", ""),
+                "tool": tr.get("tool") or tr.get("tool_name", ""),
+                "status": "fail" if raw in ("fail", "error", "failed") else "pass",
+                "order": int(tr.get("order", 0) or 0),
+                "duration_ms": int(tr.get("duration_ms", 0) or 0),
+                "started_offset_ms": int(tr.get("started_offset_ms", 0) or 0),
+                "args_summary": str(tr.get("args_summary", "")),
+                "result_summary": str(tr.get("result_summary", "")),
+            })
+        calls.sort(key=lambda c: c["order"])
+        return {
+            "name": name, "status": status, "duration_ms": duration_ms,
+            "model": model or model_name, "tool_calls": calls,
+        }
 
     async def _emit(event: dict) -> None:
         if on_progress:
             await on_progress(event)
 
+    async def _emit_trace() -> None:
+        await _emit({"trace": {
+            "request_id": request_id, "started_at": start_time, "completed_at": "",
+            "total_duration_ms": _off(), "phases": trace_phases,
+        }})
+
     # --- Pre-flight: CPT/HCPCS format validation ---
     logger.info("Pre-flight: Validating procedure code formats")
+    _pf_start = _off()
+    _pf_t0 = time.monotonic()
     cpt_validation = validate_procedure_codes(
         request_data.get("procedure_codes", [])
     )
+    _pf_ms = int((time.monotonic() - _pf_t0) * 1000)
     if not cpt_validation["valid"]:
         logger.warning("CPT validation found invalid codes: %s", cpt_validation["summary"])
+
+    trace_phases.append({
+        "name": "preflight", "status": "completed",
+        "started_offset_ms": _pf_start, "duration_ms": _pf_ms,
+        "agents": [{
+            "name": "CPT/HCPCS Format Validation", "status": "done",
+            "duration_ms": _pf_ms, "model": "local",
+            "tool_calls": [{
+                "tool_name": "cpt_format_validation", "tool": "cpt_format_validation",
+                "server_label": "local",
+                "status": "pass" if cpt_validation["valid"] else "fail",
+                "order": 0, "duration_ms": _pf_ms, "started_offset_ms": 0,
+                "args_summary": "", "result_summary": cpt_validation["summary"][:500],
+            }],
+        }],
+    })
 
     await _emit({
         "phase": "preflight", "status": "completed", "progress_pct": 5,
         "message": "CPT/HCPCS format validation complete",
         "agents": {},
     })
+    await _emit_trace()
 
     # --- Phase 1: Parallel — Documentation Completeness + Clinical Evidence Retrieval ---
     logger.info("Phase 1: Running Documentation Completeness and Clinical Evidence agents in parallel")
@@ -1010,15 +1082,16 @@ async def _run_review_pipeline(
         },
     })
 
+    _p1_start = _off()
     with tracer.start_as_current_span("phase_1_parallel") as p1_span:
         compliance_task = asyncio.create_task(
-            _safe_run("Compliance Agent", run_compliance_review, request_data)
+            _timed("Compliance Agent", run_compliance_review, request_data)
         )
         clinical_task = asyncio.create_task(
-            _safe_run("Clinical Reviewer Agent", run_clinical_review, clinical_request)
+            _timed("Clinical Reviewer Agent", run_clinical_review, clinical_request)
         )
 
-        compliance_result, clinical_result = await asyncio.gather(
+        (compliance_result, _comp_ms), (clinical_result, _clin_ms) = await asyncio.gather(
             compliance_task, clinical_task
         )
 
@@ -1067,6 +1140,16 @@ async def _run_review_pipeline(
         },
     })
 
+    trace_phases.append({
+        "name": "phase_1", "status": "completed",
+        "started_offset_ms": _p1_start, "duration_ms": _off() - _p1_start,
+        "agents": [
+            _trace_agent("Documentation Completeness", compliance_result, _comp_ms),
+            _trace_agent("Clinical Evidence Retrieval", clinical_result, _clin_ms),
+        ],
+    })
+    await _emit_trace()
+
     # --- Phase 2: Sequential — Policy Matching Agent (needs clinical findings) ---
     logger.info("Phase 2: Running Policy Matching Agent with clinical findings")
 
@@ -1078,8 +1161,9 @@ async def _run_review_pipeline(
         },
     })
 
+    _p2_start = _off()
     with tracer.start_as_current_span("phase_2_coverage") as p2_span:
-        coverage_result = await _safe_run(
+        coverage_result, _cov_ms = await _timed(
             "Coverage Agent", run_coverage_review, request_data, clinical_result
         )
 
@@ -1097,6 +1181,11 @@ async def _run_review_pipeline(
         # Normalize coverage result (fix provider data format, etc.)
         coverage_result = _normalize_coverage_result(coverage_result)
 
+        # Deterministically fill provider taxonomies + per-code coverage matrix
+        # from the medical-data MCP server (removes LLM run-to-run variance for
+        # these demo-critical fields). Best-effort; no-op on failure.
+        coverage_result = await enrich_coverage(coverage_result, request_data)
+
         p2_span.set_attribute("agent.coverage.status",
                               "error" if coverage_result.get("error") else "success")
 
@@ -1111,6 +1200,13 @@ async def _run_review_pipeline(
         },
     })
 
+    trace_phases.append({
+        "name": "phase_2", "status": "completed",
+        "started_offset_ms": _p2_start, "duration_ms": _off() - _p2_start,
+        "agents": [_trace_agent("Policy Matching", coverage_result, _cov_ms)],
+    })
+    await _emit_trace()
+
     # --- Phase 3: Submission Readiness Assessment ---
     logger.info("Phase 3: Assessing submission readiness")
 
@@ -1122,6 +1218,8 @@ async def _run_review_pipeline(
         },
     })
 
+    _p3_start = _off()
+    _p3_t0 = time.monotonic()
     with tracer.start_as_current_span("phase_3_synthesis") as p3_span:
         synthesis = await _run_synthesis(
             request_data, compliance_result, clinical_result, coverage_result,
@@ -1133,6 +1231,7 @@ async def _run_review_pipeline(
             clinical_result,
             coverage_result,
         )
+        _syn_ms = int((time.monotonic() - _p3_t0) * 1000)
 
         p3_span.set_attribute("synthesis.recommendation",
                               synthesis.get("recommendation", "unknown"))
@@ -1169,6 +1268,13 @@ async def _run_review_pipeline(
         },
     })
 
+    trace_phases.append({
+        "name": "phase_3", "status": "completed",
+        "started_offset_ms": _p3_start, "duration_ms": _syn_ms,
+        "agents": [_trace_agent("Submission Readiness", synthesis, _syn_ms)],
+    })
+    await _emit_trace()
+
     # --- Phase 4: Audit Trail & Justification ---
     logger.info("Phase 4: Building audit trail and justification document")
 
@@ -1178,6 +1284,8 @@ async def _run_review_pipeline(
         "agents": {},
     })
 
+    _p4_start = _off()
+    _p4_t0 = time.monotonic()
     with tracer.start_as_current_span("phase_4_audit") as p4_span:
         confidence, confidence_level = _compute_confidence(
             compliance_result, clinical_result, coverage_result
@@ -1206,6 +1314,21 @@ async def _run_review_pipeline(
 
         p4_span.set_attribute("audit.confidence", final_confidence)
         p4_span.set_attribute("audit.confidence_level", final_level)
+
+    _p4_ms = int((time.monotonic() - _p4_t0) * 1000)
+    trace_phases.append({
+        "name": "phase_4", "status": "completed",
+        "started_offset_ms": _p4_start, "duration_ms": _p4_ms,
+        "agents": [{
+            "name": "Audit Trail & Justification", "status": "done",
+            "duration_ms": _p4_ms, "model": "local", "tool_calls": [],
+        }],
+    })
+    execution_trace = {
+        "request_id": request_id, "started_at": start_time,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "total_duration_ms": _off(), "phases": trace_phases,
+    }
 
     # --- Assemble final response ---
     all_tool_results = []
@@ -1317,6 +1440,7 @@ async def _run_review_pipeline(
             "coverage": _enrich_agent_result("coverage", coverage_result),
         },
         "audit_trail": audit_trail,
+        "execution_trace": execution_trace,
         "audit_justification": audit_justification,
         "audit_justification_pdf": audit_justification_pdf,
     }

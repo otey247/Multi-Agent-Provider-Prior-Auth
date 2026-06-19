@@ -252,6 +252,133 @@ def _check_page_space(pdf: FPDF, needed: float) -> None:
 # Reusable section renderers
 # ---------------------------------------------------------------------------
 
+def _as_field(obj: Any, key: str, default: Any = None) -> Any:
+    """Read a field from either a dict or a pydantic-model-like object."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _render_taxonomies_table(pdf: FPDF, taxonomies: Any) -> None:
+    """Render the provider's primary+secondary taxonomies as a table.
+
+    Renders nothing when ``taxonomies`` is absent or empty (legacy records
+    with only a single ``specialty`` keep current behavior). Resilient to
+    dict or pydantic-model entries; never raises on malformed data.
+    """
+    if not taxonomies or not isinstance(taxonomies, (list, tuple)):
+        return
+
+    rows = [t for t in taxonomies if t is not None]
+    if not rows:
+        return
+
+    _check_page_space(pdf, 8 + 6 * (len(rows) + 1))
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_x(10)
+    pdf.cell(0, 6, "Taxonomies:")
+    pdf.ln(6)
+
+    col_widths = [22, 96, 20, 30, 22]
+    columns = [
+        ("Code", col_widths[0]),
+        ("Description", col_widths[1]),
+        ("Primary", col_widths[2]),
+        ("License", col_widths[3]),
+        ("State", col_widths[4]),
+    ]
+    _table_header(pdf, columns)
+
+    for idx, tax in enumerate(rows):
+        _check_page_space(pdf, 8)
+        primary = "Yes" if _as_field(tax, "primary", False) else "No"
+        _table_row(
+            pdf,
+            [
+                (_safe_str(_as_field(tax, "code", "")), col_widths[0]),
+                (_safe_str(_as_field(tax, "desc", ""))[:60], col_widths[1]),
+                (primary, col_widths[2]),
+                (_safe_str(_as_field(tax, "license", "")), col_widths[3]),
+                (_safe_str(_as_field(tax, "state", "")), col_widths[4]),
+            ],
+            idx,
+            status_col=2,
+        )
+    pdf.ln(4)
+
+
+def _render_per_code_coverage_table(pdf: FPDF, per_code: Any) -> None:
+    """Render the per-code Medicare coverage table.
+
+    Each row is a submitted ICD-10/HCPCS code matched against the retrieved
+    policy, color-coded by status (covered / non-covered / not-listed).
+    Renders nothing when ``per_code`` is absent or empty; never raises.
+    """
+    if not per_code or not isinstance(per_code, (list, tuple)):
+        return
+
+    rows = [c for c in per_code if c is not None]
+    if not rows:
+        return
+
+    _check_page_space(pdf, 8 + 6 * (len(rows) + 1))
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_x(10)
+    pdf.cell(0, 6, "Per-Code Coverage (Medicare Policy Match):")
+    pdf.ln(6)
+
+    col_widths = [30, 28, 42, 90]
+    columns = [
+        ("Code", col_widths[0]),
+        ("Type", col_widths[1]),
+        ("Status", col_widths[2]),
+        ("Policy", col_widths[3]),
+    ]
+    _table_header(pdf, columns)
+
+    for idx, entry in enumerate(rows):
+        _check_page_space(pdf, 8)
+        if idx % 2 == 1:
+            pdf.set_fill_color(*_GRAY_ROW)
+        else:
+            pdf.set_fill_color(*_WHITE)
+
+        code = _safe_str(_as_field(entry, "code", ""))
+        code_type = _safe_str(_as_field(entry, "code_type", ""))
+        status_raw = str(_as_field(entry, "status", "") or "").strip().lower()
+        policy = _safe_str(_as_field(entry, "policy_id", ""))
+
+        # Map status -> display label + color, consistent with PDF styling.
+        if status_raw == "covered":
+            status_label, status_color, status_style = "COVERED", _GREEN_TEXT, "B"
+        elif status_raw == "non_covered":
+            status_label, status_color, status_style = "NON-COVERED", _RED_TEXT, "B"
+        elif status_raw == "not_listed":
+            status_label, status_color, status_style = "NOT LISTED", _AMBER_TEXT, "B"
+        else:
+            status_label, status_color, status_style = (
+                _safe_str(status_raw or "N/A").upper(), _BLACK, "",
+            )
+
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(*_BLACK)
+        pdf.cell(col_widths[0], 6, code[:60], border=1, fill=True)
+        pdf.cell(col_widths[1], 6, code_type[:60], border=1, fill=True)
+
+        pdf.set_font("Helvetica", status_style, 8)
+        pdf.set_text_color(*status_color)
+        pdf.cell(col_widths[2], 6, status_label, border=1, fill=True)
+
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(*_BLACK)
+        pdf.cell(col_widths[3], 6, policy[:60], border=1, fill=True)
+        pdf.ln()
+
+    pdf.ln(4)
+
+
 def _render_section_1_executive_summary(
     pdf: FPDF,
     request_data: dict,
@@ -330,6 +457,14 @@ def _render_section_2_medical_necessity(
             _kv(pdf, "Ordering Provider", f"NPI {pv.get('npi', 'N/A')} -- {specialty}")
         _kv(pdf, "Provider Status", pv_status)
 
+        # Credential (optional, new field)
+        credential = pv.get("credential", "")
+        if credential and isinstance(credential, str) and credential.strip():
+            _kv(pdf, "Credential", credential)
+
+        # Taxonomies table (optional, new field): full primary+secondary specialties
+        _render_taxonomies_table(pdf, pv.get("taxonomies"))
+
     # Payer policies matched
     policies = coverage_result.get("coverage_policies", [])
     if policies:
@@ -339,6 +474,9 @@ def _render_section_2_medical_necessity(
         for p in policies:
             if isinstance(p, dict):
                 _bullet(pdf, f"{p.get('policy_id', '?')}: {p.get('title', 'N/A')} ({p.get('type', '?')})")
+
+    # Per-code coverage (optional, new field): submitted codes vs. policy
+    _render_per_code_coverage_table(pdf, coverage_result.get("per_code_coverage"))
 
     # Clinical evidence retrieved
     extraction = clinical_result.get("clinical_extraction", {})

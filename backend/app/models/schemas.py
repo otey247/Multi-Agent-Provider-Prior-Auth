@@ -27,6 +27,14 @@ class ToolResult(BaseModel):
     tool_name: str = ""
     status: str = "warning"  # "pass", "fail", "warning"
     detail: str = ""
+    # Execution-trace enrichment (populated by the agent toolbox loop).
+    server_label: str = ""
+    tool: str = ""
+    order: int = 0
+    duration_ms: int = 0
+    started_offset_ms: int = 0
+    args_summary: str = ""
+    result_summary: str = ""
 
 
 # --- Per-agent result models ---
@@ -108,19 +116,36 @@ class ClinicalResult(BaseModel):
     error: str | None = None
 
 
+class TaxonomyDetail(BaseModel):
+    code: str = ""
+    desc: str = ""
+    primary: bool = False
+    license: str = ""
+    state: str = ""
+
+
 class ProviderVerification(BaseModel):
     npi: str = ""
     name: str = ""
-    specialty: str = ""
+    specialty: str = ""  # primary taxonomy description (back-compat)
     status: str = ""  # "active", "inactive", "not_found"
     detail: str = ""
+    credential: str = ""
+    taxonomies: list[TaxonomyDetail] = []
 
 
 class CoveragePolicy(BaseModel):
     policy_id: str = ""
     title: str = ""
-    type: str = ""  # "LCD", "NCD"
+    type: str = ""  # "LCD", "NCD", "Article"
     relevant: bool = True
+
+
+class PerCodeCoverage(BaseModel):
+    code: str = ""
+    code_type: str = ""  # "ICD10" | "HCPCS"
+    status: str = "not_listed"  # "covered" | "non_covered" | "not_listed"
+    policy_id: str = ""
 
 
 class CriterionAssessment(BaseModel):
@@ -145,6 +170,7 @@ class CoverageResult(BaseModel):
     checks_performed: list[AgentCheck] = []
     provider_verification: ProviderVerification | None = None
     coverage_policies: list[CoveragePolicy] = []
+    per_code_coverage: list[PerCodeCoverage] = []
     criteria_assessment: list[CriterionAssessment] = []
     coverage_criteria_met: list[str] = []
     coverage_criteria_not_met: list[str] = []
@@ -192,6 +218,45 @@ class AuditTrail(BaseModel):
     criteria_met_count: str = ""  # "N/M" format
 
 
+# --- Execution trace (in-app technical-demo timeline) ---
+
+
+class TraceToolCall(BaseModel):
+    tool_name: str = ""
+    server_label: str = ""
+    tool: str = ""
+    status: str = "pass"  # "pass" | "fail"
+    order: int = 0
+    duration_ms: int = 0
+    started_offset_ms: int = 0
+    args_summary: str = ""
+    result_summary: str = ""
+
+
+class TraceAgent(BaseModel):
+    name: str = ""
+    status: str = ""  # "done" | "warning" | "error"
+    duration_ms: int = 0
+    model: str = ""
+    tool_calls: list[TraceToolCall] = []
+
+
+class TracePhase(BaseModel):
+    name: str = ""  # "preflight" | "phase_1" | "phase_2" | "phase_3" | "phase_4"
+    status: str = ""
+    started_offset_ms: int = 0
+    duration_ms: int = 0
+    agents: list[TraceAgent] = []
+
+
+class ExecutionTrace(BaseModel):
+    request_id: str = ""
+    started_at: str = ""
+    completed_at: str = ""
+    total_duration_ms: int = 0
+    phases: list[TracePhase] = []
+
+
 class ReviewResponse(BaseModel):
     request_id: str
     recommendation: str  # "ready_to_submit", "needs_review"
@@ -211,6 +276,7 @@ class ReviewResponse(BaseModel):
     disclaimer: str = "AI-assisted draft. Payer policies applied for Medicare LCDs/NCDs. Human review required before submission."
     agent_results: AgentResults | None = None
     audit_trail: AuditTrail | None = None
+    execution_trace: ExecutionTrace | None = None
     audit_justification: str | None = None
     audit_justification_pdf: str | None = None  # Base64-encoded PDF
 

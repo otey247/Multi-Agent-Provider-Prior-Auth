@@ -18,7 +18,7 @@ import {
   User,
   X,
 } from "lucide-react";
-import type { PriorAuthRequest, ReviewResponse, ReviewProgress, ProgressEvent, AgentId } from "@/lib/types";
+import type { PriorAuthRequest, ReviewResponse, ReviewProgress, ProgressEvent, AgentId, ExecutionTrace } from "@/lib/types";
 import { submitReviewStream } from "@/lib/api";
 import { DEFAULT_SAMPLE_CASE_ID, SAMPLE_CASES } from "@/lib/sample-case";
 import { ProgressTracker } from "@/components/progress-tracker";
@@ -38,6 +38,8 @@ import {
 
 interface UploadFormProps {
   onReviewComplete: (review: ReviewResponse) => void;
+  onTrace?: (trace: ExecutionTrace) => void;
+  onRunStart?: () => void;
 }
 
 function cleanStringArray(values: string[]): string[] {
@@ -64,7 +66,7 @@ const emptyRequest: PriorAuthRequest = {
   prior_treatment_history: [],
 };
 
-export function UploadForm({ onReviewComplete }: UploadFormProps) {
+export function UploadForm({ onReviewComplete, onTrace, onRunStart }: UploadFormProps) {
   const [form, setForm] = useState<PriorAuthRequest>(emptyRequest);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -165,6 +167,7 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
     setLoading(true);
     setError(null);
     setProgress(initialProgress);
+    onRunStart?.();
 
     const cleaned: PriorAuthRequest = {
       ...form,
@@ -196,6 +199,9 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
         setProgress((prev) => prev ? { ...prev, error: errMsg } : prev);
         setError(errMsg);
         toast.error("Review failed", { description: errMsg });
+      },
+      (trace) => {
+        onTrace?.(trace);
       },
     );
   }

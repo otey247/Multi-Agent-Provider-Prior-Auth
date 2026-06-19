@@ -3,6 +3,10 @@ uvicorn>=0.29.0
 python-dotenv>=1.0.0
 pydantic>=2.0.0
 httpx>=0.27.0
+# MCP client — backend calls the medical-data MCP server directly to compute
+# provider taxonomies + the per-code coverage matrix deterministically
+# (removes LLM variance for these demo-critical fields).
+mcp>=1.9.0
 python-multipart>=0.0.9
 fpdf2>=2.8.0
 azure-monitor-opentelemetry>=1.6.0

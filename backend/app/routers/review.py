@@ -14,6 +14,7 @@ from app.models.schemas import (
     ReviewSummary,
     AgentResults,
     AuditTrail,
+    ExecutionTrace,
     ComplianceResult,
     ClinicalResult,
     CoverageResult,
@@ -76,6 +77,9 @@ def _build_review_response(request_id: str, result: dict) -> ReviewResponse:
     audit_raw = result.get("audit_trail")
     audit_trail = _safe_parse(AuditTrail, audit_raw)
 
+    # Parse execution trace (in-app demo timeline)
+    execution_trace = _safe_parse(ExecutionTrace, result.get("execution_trace"))
+
     # Parse documentation gaps
     doc_gaps = []
     for g in result.get("documentation_gaps", []):
@@ -110,6 +114,7 @@ def _build_review_response(request_id: str, result: dict) -> ReviewResponse:
         ),
         agent_results=agent_results,
         audit_trail=audit_trail,
+        execution_trace=execution_trace,
         audit_justification=result.get("audit_justification"),
         audit_justification_pdf=result.get("audit_justification_pdf"),
     )
@@ -208,6 +213,10 @@ async def submit_review_stream(request: PriorAuthRequest, http_request: Request)
                 elif event.get("_type") == "error":
                     data = json.dumps({"detail": event["detail"]})
                     yield f"event: error\ndata: {data}\n\n"
+                elif "trace" in event:
+                    # Incremental execution-trace snapshot for the live trace tab.
+                    data = json.dumps(event["trace"], default=str)
+                    yield f"event: trace\ndata: {data}\n\n"
                 else:
                     data = json.dumps(event, default=str)
                     yield f"event: progress\ndata: {data}\n\n"
@@ -1043,6 +1052,18 @@ def _generate_coverage_checks(raw: dict) -> list[dict]:
             "rule": "Step 7: Documentation Gap Analysis",
             "result": "pass",
             "detail": "No documentation gaps identified",
+        })
+
+    # Per-code coverage matrix (covered/non-covered/not-listed against policy)
+    pcc = raw.get("per_code_coverage", [])
+    if isinstance(pcc, list) and pcc:
+        covered = sum(1 for c in pcc if isinstance(c, dict) and c.get("status") == "covered")
+        non_covered = sum(1 for c in pcc if isinstance(c, dict) and c.get("status") == "non_covered")
+        not_listed = len(pcc) - covered - non_covered
+        checks.append({
+            "rule": "Per-Code Coverage Matrix",
+            "result": "pass" if non_covered == 0 else "warning",
+            "detail": f"{covered} covered, {non_covered} non-covered, {not_listed} not-listed of {len(pcc)} codes",
         })
 
     # Tool Results audit trail

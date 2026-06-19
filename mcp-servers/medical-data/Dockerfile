@@ -18,6 +18,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py ./
+COPY demo_fixtures.py ./
 
 RUN useradd --create-home appuser && chown -R appuser:appuser /app
 USER appuser

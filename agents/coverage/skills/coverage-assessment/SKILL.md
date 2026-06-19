@@ -71,9 +71,16 @@ for efficiency (NPI validation is independent of policy search).
    full provider details.
 3. Verify: provider is active, has appropriate specialty for the requested
    procedure, and license is current.
-4. **Specialty-Procedure Appropriateness (REQUIRED criterion)**: Using the
-   provider's taxonomy description returned by NPI lookup, determine whether
-   their specialty is clinically appropriate for the category of service
+4. **Capture full credentials**: `npi_lookup` returns a `taxonomies` array
+   (primary + secondary specialties, each with `code`, `desc`, `primary`,
+   `license`, `state`) plus a `credential`. Copy ALL of them into
+   `provider_verification.taxonomies` and `provider_verification.credential`,
+   and set `provider_verification.specialty` to the primary taxonomy's `desc`.
+   Do not drop secondary taxonomies — a dual-credentialed provider's secondary
+   specialty may be the one that matches the requested procedure.
+5. **Specialty-Procedure Appropriateness (REQUIRED criterion)**: Using ALL of
+   the provider's taxonomy descriptions (primary and secondary), determine
+   whether their specialty is clinically appropriate for the category of service
    being requested. Add this as an explicit entry in `criteria_assessment`:
    - `criterion`: `"Provider Specialty-Procedure Appropriateness"`
    - `status`: `MET` if the taxonomy aligns with the requested CPT category
@@ -211,6 +218,21 @@ instead:
   support medical necessity (severity indicators, prior treatments, diagnostic
   findings, clinical progression).
 
+#### Step 6b: Per-Code Coverage Matrix (REQUIRED when a policy was found)
+
+`get_coverage_document` returns `covered_icd10`, `noncovered_icd10`, and
+`hcpcs` lists for the retrieved policy. Build a `per_code_coverage` array that
+maps EACH submitted code to its coverage status against those lists:
+- For every submitted ICD-10 diagnosis code: `code_type` = `"ICD10"`;
+  `status` = `"covered"` if it appears in `covered_icd10`, `"non_covered"` if it
+  appears in `noncovered_icd10`, otherwise `"not_listed"`.
+- For every submitted procedure (CPT/HCPCS) code: `code_type` = `"HCPCS"`;
+  `status` = `"covered"` if it appears in the policy `hcpcs` list, otherwise
+  `"not_listed"`.
+- Set `policy_id` to the policy the code was matched against.
+This drives a covered/excluded matrix in the UI and audit report. If no policy
+was found, return an empty `per_code_coverage` array.
+
 #### Step 7: Documentation Gap Analysis
 
 Compare policy requirements to available clinical data:
@@ -248,10 +270,18 @@ Return JSON with this exact structure:
         "name": "Dr. ...",
         "specialty": "...",
         "status": "active|inactive|not_found",
-        "detail": "..."
+        "detail": "...",
+        "credential": "MD",
+        "taxonomies": [
+            {"code": "207X00000X", "desc": "Orthopaedic Surgery", "primary": true, "license": "MD-12345", "state": "OH"}
+        ]
     },
     "coverage_policies": [
-        {"policy_id": "L35062", "title": "...", "type": "LCD|NCD", "relevant": true}
+        {"policy_id": "L35062", "title": "...", "type": "LCD|NCD|Article", "relevant": true}
+    ],
+    "per_code_coverage": [
+        {"code": "M43.16", "code_type": "ICD10", "status": "covered|non_covered|not_listed", "policy_id": "L37848"},
+        {"code": "22612", "code_type": "HCPCS", "status": "covered|not_listed", "policy_id": "L37848"}
     ],
     "criteria_assessment": [
         {
