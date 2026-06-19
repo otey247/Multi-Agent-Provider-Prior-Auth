@@ -821,6 +821,24 @@ hooks:
         if (-not $registered) { Write-Host "  ERROR: Agent registration failed after $maxAttempts attempts!" -ForegroundColor Red; exit 1 }
         Write-Host "  Agent registration complete" -ForegroundColor Green
 
+        # ── Create/update Foundry Toolboxes (clinical-tools, coverage-tools) ──
+        # The clinical/coverage agents consume MCP through these project-domain
+        # toolboxes (see agents/*/mcp_toolbox.py), which proxy out to the
+        # mcp-medical-data container. Requires MEDICAL_MCP_BASE_URL.
+        if ($env:MEDICAL_MCP_BASE_URL) {
+            Write-Host ""
+            Write-Host "  Creating/updating Foundry toolboxes..." -ForegroundColor White
+            python -m pip install "mcp>=1.9.0" --quiet 2>$null
+            python scripts/create_toolbox.py 2>&1 | ForEach-Object { Write-Host $_ }
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  Toolboxes ready" -ForegroundColor Green
+            } else {
+                Write-Host "  WARNING: toolbox creation/verification failed — clinical/coverage tools may be unavailable" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  WARNING: MEDICAL_MCP_BASE_URL not set — skipping toolbox creation (clinical/coverage tools disabled)" -ForegroundColor Yellow
+        }
+
         # ── Pre-flight health check ──────────────────────────────────
         Write-Host ""
         Write-Host "  Running pre-flight health check..." -ForegroundColor Yellow
@@ -1062,6 +1080,22 @@ hooks:
         done
         if ! $REGISTERED; then printf "${Red}  ERROR: Agent registration failed after %d attempts!${NC}\n" "$MAX_ATTEMPTS"; exit 1; fi
         printf "${Green}  Agent registration complete${NC}\n"
+
+        # ── Create/update Foundry Toolboxes (clinical-tools, coverage-tools) ──
+        # The clinical/coverage agents consume MCP through these project-domain
+        # toolboxes (see agents/*/mcp_toolbox.py), which proxy out to the
+        # mcp-medical-data container. Requires MEDICAL_MCP_BASE_URL.
+        if [ -n "$MEDICAL_MCP_BASE_URL" ]; then
+            printf "\n${White}  Creating/updating Foundry toolboxes...${NC}\n"
+            python -m pip install "mcp>=1.9.0" --quiet 2>/dev/null || true
+            if python scripts/create_toolbox.py 2>&1; then
+                printf "${Green}  Toolboxes ready${NC}\n"
+            else
+                printf "${Yellow}  WARNING: toolbox creation/verification failed — clinical/coverage tools may be unavailable${NC}\n"
+            fi
+        else
+            printf "${Yellow}  WARNING: MEDICAL_MCP_BASE_URL not set — skipping toolbox creation (clinical/coverage tools disabled)${NC}\n"
+        fi
 
         # ── Pre-flight health check ──────────────────────────────────
         printf "\n${Yellow}  Running pre-flight health check...${NC}\n"

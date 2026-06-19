@@ -2,10 +2,12 @@
 # agentserver-core 2.x provides ResponsesAgentServerHost (no agent-framework dep).
 azure-ai-agentserver-core==2.0.0b6
 azure-ai-agentserver-responses==1.0.0b7
-# OpenAI SDK — calls the Foundry Responses API with server-side `type: mcp` tools
-# (Foundry executes the MCP servers; the container opens no MCP client) and
+# OpenAI SDK — drives the Foundry Responses API in a tool-calling loop with
 # structured output via responses.parse(text_format=ClinicalResult).
 openai>=1.68.0
+# MCP client SDK — connects to the Foundry Toolbox MCP endpoint (clinical-tools)
+# per request; see mcp_toolbox.py.
+mcp>=1.9.0
 # Managed identity / DefaultAzureCredential (sync + azure.identity.aio)
 azure-identity>=1.15.0
 # Structured output schema

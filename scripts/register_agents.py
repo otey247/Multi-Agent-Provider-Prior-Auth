@@ -169,7 +169,10 @@ def _build_hosted_agent_definition(
             protocol=AgentProtocol.RESPONSES,
             version=os.environ.get(
                 "HOSTED_AGENT_RESPONSES_PROTOCOL_VERSION",
-                "v0.1.1",
+                # Platform requires "1.0.0"; "v0.1.1" is stored but rejected at
+                # runtime ("Unsupported responses protocol version ''"). Must match
+                # the default printed at the responses_protocol_version read site.
+                "1.0.0",
             ),
         )
     ]
@@ -595,28 +598,38 @@ def run() -> None:
             print(f" FAILED\nERROR: {exc}", file=sys.stderr)
             sys.exit(1)
 
-        print(f"  Starting {name} (version {version_num})...", end="", flush=True)
+        # Route 100% of endpoint traffic to the version just created. This is
+        # the RELIABLE activation path. The previous approach
+        # (`az cognitiveservices agent start`) is a preview CLI extension that
+        # is frequently unavailable in CI and locally; when it fails, the
+        # endpoint keeps serving an OLDER version, so new images/code deploy
+        # but behavior never changes (observed as persistent runtime errors on
+        # an endpoint pinned to a stale version). patch_agent_details uses the
+        # base data-plane SDK and works without the CLI extension.
+        print(f"  Routing {name} traffic to version {version_num}...", end="", flush=True)
         try:
-            started, detail = _run_agent_start_command(
-                account_name,
-                project_name,
+            client.beta.agents.patch_agent_details(
                 name,
-                str(version_num),
+                {
+                    "agent_endpoint": {
+                        "version_selector": {
+                            "version_selection_rules": [
+                                {
+                                    "type": "FixedRatio",
+                                    "agent_version": str(version_num),
+                                    "traffic_percentage": 100,
+                                }
+                            ]
+                        }
+                    }
+                },
             )
-            if started:
-                print(" started")
-                if detail:
-                    print(f"    {detail}")
-            else:
-                print(
-                    " WARNING: could not auto-start via CLI.\n"
-                    f"{detail}\n"
-                    f"  Manually start from Foundry portal: Agents > {name} > Start",
-                )
-        except FileNotFoundError:
+            print(" routed")
+        except Exception as exc:  # noqa: BLE001 — best effort, non-fatal
             print(
-                " WARNING: 'az' CLI not found -- start the agent from Foundry portal:\n"
-                f"  Agents > {name} > Start"
+                f" WARNING: could not set version routing via SDK ({exc}).\n"
+                f"  Route traffic from the Foundry portal: Agents > {name} > "
+                f"send 100% traffic to version {version_num}."
             )
 
     print()
