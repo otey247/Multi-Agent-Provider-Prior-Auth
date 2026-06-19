@@ -4,7 +4,7 @@
 
 This guide walks you through deploying the **Prior Authorization Review — Multi-Agent Solution Accelerator** to Azure. The default deployment takes approximately 10 minutes and provisions the frontend, backend/orchestrator, and Microsoft Foundry project resources.
 
-> **Architecture note:** The project ships with four independent MAF Hosted Agent packages under `agents/` (clinical, coverage, compliance, synthesis). `docker compose up --build` starts all six services locally. For Azure, each agent is deployed as its own Foundry Hosted Agent container; the FastAPI orchestrator calls them over HTTP.
+> **Architecture note:** The project ships with four independent Microsoft Foundry Hosted Agent packages under `agents/` (clinical, coverage, compliance, synthesis), all built on the `azure-ai-agentserver` Responses host. The Clinical and Coverage agents drive the model with the OpenAI SDK `responses.parse` and call tools through Foundry Toolboxes; the Compliance and Synthesis agents use the Microsoft Agent Framework and call no tools. Both paths emit token-level structured output. `docker compose up --build` starts all six services locally. For Azure, each agent is deployed as its own Foundry Hosted Agent container; the FastAPI orchestrator calls them through the Foundry Responses API.
 
 🆘 **Need Help?** If you encounter any issues during deployment, check our [Troubleshooting Guide](./troubleshooting.md) for solutions to common problems.
 
@@ -177,13 +177,13 @@ Review the configuration options below. You can customize any settings that meet
 
 > **Note:** This step is only required for **local development** or **Docker Compose** deployments. If you are deploying with `azd up`, skip this step — after `azd up` completes, see [Step 4.3](#43-deployment-complete--no-manual-steps-required).
 
-The backend uses `backend/.env` and each MAF agent container reads env vars from its own `agent.yaml` (Foundry) or the root `.env` (Docker Compose).
+The backend uses `backend/.env` and each agent container reads env vars from its own `agent.yaml` (Foundry) or the root `.env` (Docker Compose).
 
 **`backend/.env`** (orchestrator only):
 
 ```env
 # Hosted agent endpoints
-# Docker Compose: point to the MAF agent services
+# Docker Compose: point to the agent services
 HOSTED_AGENT_CLINICAL_URL=http://agent-clinical:8088
 HOSTED_AGENT_COVERAGE_URL=http://agent-coverage:8088
 HOSTED_AGENT_COMPLIANCE_URL=http://agent-compliance:8088
@@ -194,7 +194,7 @@ HOSTED_AGENT_TIMEOUT_SECONDS=180
 APPLICATION_INSIGHTS_CONNECTION_STRING=InstrumentationKey=...;IngestionEndpoint=...
 ```
 
-**Env vars required by each MAF agent container** (set via `agent.yaml` on Foundry, or add to root `.env` for Docker Compose):
+**Env vars required by each agent container** (set via `agent.yaml` on Foundry, or add to root `.env` for Docker Compose):
 
 ```env
 # Microsoft Foundry project endpoint (required by all 4 agent containers)
@@ -204,9 +204,9 @@ AZURE_AI_PROJECT_ENDPOINT=https://<resource-name>.services.ai.azure.com
 AZURE_OPENAI_DEPLOYMENT_NAME=gpt-5.4
 ```
 
-> **MCP tools:** Each agent container calls MCP servers directly via `MCPStreamableHTTPTool` (configured via `MCP_*` env vars in `agent.yaml` / `docker-compose.yml`). Additionally, `scripts/register_agents.py` creates Foundry project-level connections during `azd up` for portal visibility under **Build → Tools** (but agents are registered with `tools=[]` — see [technical-notes.md](technical-notes.md) for details).
+> **MCP tools:** The clinical and coverage agents consume MCP tools through Foundry **toolboxes** (`clinical-tools`, `coverage-tools`) — managed MCP endpoints on the Foundry project domain that the agent reaches as an MCP client using its managed-identity bearer token. `scripts/register_agents.py` injects each agent's `TOOLBOX_ENDPOINT` during `azd up`, and `scripts/create_toolbox.py` creates the toolboxes (which proxy out to the self-hosted **medical-data** MCP server and PubMed). The compliance and synthesis agents are pure LLM reasoning and use no tools.
 
-> **Authentication note:** MAF agents use `DefaultAzureCredential` (managed identity on Azure, Azure CLI locally) — no API key required. For local Docker Compose, ensure your local Azure CLI session is active (`az login`) or set `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` if running without CLI auth.
+> **Authentication note:** Agents use `DefaultAzureCredential` (managed identity on Azure, Azure CLI locally) — no API key required. For local Docker Compose, ensure your local Azure CLI session is active (`az login`) or set `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` if running without CLI auth.
 
 > **Where to find these values:**
 >
@@ -228,17 +228,17 @@ deployments are available.
 <details>
 <summary><b>MCP Server Endpoints</b></summary>
 
-MCP tools are managed by Foundry Agent Service as project-level tool connections, created automatically during `azd up`. The following MCP servers are registered:
+The clinical and coverage agents consume MCP tools through two Foundry **toolboxes** — managed MCP endpoints on the Foundry project domain (`{project_endpoint}/toolboxes/{name}/mcp?api-version=v1`). The toolboxes are created automatically during `azd up` by `scripts/create_toolbox.py` and proxy out to the backing MCP servers below. The self-hosted **medical-data** MCP server is provisioned by `azd` as its own Container App (its base URL is the `MEDICAL_MCP_BASE_URL` Bicep output); it wraps free public APIs. No API keys are required.
 
-| **MCP Server** | **Endpoint** | **Provider** | **Auth** | **Purpose** |
-|----------------|-------------|--------------|----------|-------------|
-| ICD-10 Codes | `https://mcp.deepsense.ai/icd10_codes/mcp` | DeepSense | Key-based (`User-Agent`) | Diagnosis code lookup |
-| PubMed | `https://pubmed.mcp.claude.com/mcp` | Anthropic | Unauthenticated | PubMed literature search |
-| Clinical Trials | `https://mcp.deepsense.ai/clinical_trials/mcp` | DeepSense | Key-based (`User-Agent`) | Clinical trial search |
-| NPI Registry | `https://mcp.deepsense.ai/npi_registry/mcp` | DeepSense | Key-based (`User-Agent`) | Provider NPI validation |
-| CMS Coverage | `https://mcp.deepsense.ai/cms_coverage/mcp` | DeepSense | Key-based (`User-Agent`) | Medicare LCD/NCD policies |
+| **Toolbox** | **Tool (server label)** | **Backing MCP server** | **Auth** | **Purpose** |
+| --- | --- | --- | --- | --- |
+| `clinical-tools` | `icd10` | medical-data `/icd10/mcp` (NLM Clinical Tables) | None | Diagnosis code lookup/validation |
+| `clinical-tools` | `pubmed` | `https://pubmed.mcp.claude.com/mcp` | None | PubMed literature search |
+| `clinical-tools` | `clinical_trials` | medical-data `/clinical_trials/mcp` (ClinicalTrials.gov v2) | None | Clinical trial search |
+| `coverage-tools` | `npi` | medical-data `/npi/mcp` (CMS NPPES) | None | Provider NPI validation |
+| `coverage-tools` | `cms_coverage` | medical-data `/cms_coverage/mcp` (CMS Coverage API) | None | Medicare LCD/NCD policies |
 
-To use custom MCP servers, update the `MCP_CONNECTIONS` list in `scripts/register_agents.py`.
+To change the tool surface, edit the toolbox definitions in `scripts/create_toolbox.py` (and the matching connection list in `scripts/register_agents.py`).
 
 </details>
 
@@ -313,6 +313,8 @@ azd up
 - Azure Container Apps Environment
 - Backend Container App (Python/FastAPI, port 8000, 2 CPU / 4Gi RAM, min 1 replica)
 - Frontend Container App (Next.js/nginx, port 80)
+- Medical-data MCP Container App (self-hosted MCP server backing the clinical/coverage toolboxes)
+- Foundry toolboxes `clinical-tools` and `coverage-tools` (created/verified during the postprovision hook)
 - Log Analytics workspace + Application Insights (linked to Foundry project automatically)
 
 > **Note:** Container images are built remotely on Azure Container Registry, so no local Docker installation is required for deployment. This works on any machine architecture (x86, ARM64) and any OS.
@@ -329,11 +331,12 @@ azd up
 |---|---|---|
 | Foundry Resource + Project | Bicep | ✅ Provisioned |
 | gpt-5.4 model (GlobalStandard or DataZoneStandard, 100K TPM) | Bicep | ✅ Deployed |
-| Container images (backend + 4 agents + frontend) | ACR remote build | ✅ Built & pushed |
+| Container images (backend + 4 agents + frontend + medical-data MCP) | ACR remote build | ✅ Built & pushed |
 | Container Apps | Bicep | ✅ Running |
-| Foundry Hosted Agents registered | `scripts/register_agents.py` postprovision hook | ✅ Registered |
+| Foundry Hosted Agents registered + 100% traffic routed to the new version | `scripts/register_agents.py` postprovision hook | ✅ Registered |
+| Foundry toolboxes (`clinical-tools`, `coverage-tools`) created & verified | `scripts/create_toolbox.py` postprovision hook | ✅ Ready |
 | App Insights linked to Foundry project | Bicep connection resource | ✅ Linked |
-| Pre-flight health check | `scripts/check_agents.py` postprovision hook | ✅ All checks passed |
+| Pre-flight health check (control-plane + runtime smoke test) | `scripts/check_agents.py --runtime` postprovision hook | ✅ All checks passed |
 
 > **Authentication:** All resources use `DefaultAzureCredential` (managed identity on Azure) — no API keys, no manual credential configuration.
 
@@ -363,21 +366,23 @@ after agent registration. It verifies:
 
 | **Check** | **What it validates** |
 |-----------|----------------------|
-| Agent Registration | All 4 agents registered at correct version with App Insights env vars |
+| Agent Registration | All 4 agents registered at correct version with required runtime env vars |
 | App Insights Connection | Connection string available for observability |
-| MCP Tool Connections | All 5 MCP servers + App Insights connection in Foundry project |
+| MCP Tool Connections | All 5 MCP connections + App Insights connection in Foundry project |
 | Backend Health | `/health` endpoint returns 200 |
 | Frontend Available | Homepage returns 200 |
+| Hosted Agent Runtime Smoke Test | Live-invokes all 4 agents through the Foundry Responses API (with `--runtime`) |
 
 You can also run it manually at any time:
 
 ```bash
-python scripts/check_agents.py              # full check
+python scripts/check_agents.py              # control-plane checks
+python scripts/check_agents.py --runtime    # add live hosted-agent smoke tests (all 4 agents)
 python scripts/check_agents.py --version 6  # verify specific agent version
 python scripts/check_agents.py --poll       # poll until all healthy
 ```
 
-If all checks pass, the output shows: **"All checks passed. Ready to submit PA requests."**
+When run with `--runtime` and all checks pass, the output shows: **"All checks passed. Ready to submit PA requests."**
 
 ### 5.2 Test the Application
 
@@ -418,8 +423,8 @@ If you configured Azure Application Insights:
 
 4. Use **Transaction Search** or **End-to-end transaction details** to follow
    a single PA review across all five processes — backend orchestration spans
-   stitch to the MAF `invoke_agent` / `chat` / `execute_tool` spans inside
-   each agent container via W3C trace context headers.
+   stitch to the agent and `gen_ai.*` tool-call spans inside each agent
+   container via W3C trace context headers.
 
 5. Check **Live Metrics** during an active review to see real-time request
    rates, dependency durations, and exceptions across all containers.
@@ -607,11 +612,11 @@ The level of trace detail visible in Foundry depends on upstream framework relea
 
 | What | When | Trace Detail |
 |------|------|-------------|
-| **HTTP-level traces** | Available now | Request/response to `/review` endpoint (duration, status code) |
-| **Agent-level traces** | Available now (rc3+) | `invoke_agent` spans with agent name, duration, response capture, exception tracking |
-| **Tool-level traces** | Available now with MAF native agents | Individual MCP tool call spans (e.g., `npi_lookup`, `validate_code`) as child spans via `gen_ai.*` semantic conventions |
+| **HTTP-level traces** | Available now | Request/response to the agent Responses endpoint (duration, status code) |
+| **Agent-level traces** | Available now | Per-request agent spans with agent name, duration, response capture, exception tracking |
+| **Tool-level traces** | Available now | Individual MCP tool call spans (e.g., `npi_validate`, `validate_code`) as child spans via `gen_ai.*` semantic conventions |
 
-MAF's `from_agent_framework` pattern emits W3C-compliant trace context and standard `gen_ai.*` OTel spans natively — this resolves the black-box tracing limitation of the previous Claude SDK subprocess approach. Agent dependency versions are already pinned in each `agents/*/requirements.txt` (`agent-framework-core>=1.0.0rc2,<=1.0.0rc3`, `azure-ai-agentserver-core>=1.0.0b16`, `azure-ai-agentserver-agentframework>=1.0.0b16`). To pick up newer trace capabilities, update those pins and rebuild.
+Each agent runs on the `azure-ai-agentserver` Responses host, which exports W3C-compliant trace context and standard `gen_ai.*` OTel spans via Azure Monitor OpenTelemetry. Dependency versions are pinned in each `agents/*/requirements.txt`: all agents share `azure-ai-agentserver-core==2.0.0b6`, `azure-ai-agentserver-responses==1.0.0b7`, and `azure-monitor-opentelemetry>=1.6.0`; the Clinical and Coverage agents add `openai>=1.68.0` and `mcp>=1.9.0` (OpenAI SDK + toolbox MCP client), while the Compliance and Synthesis agents add `agent-framework-core` and `agent-framework-azure-ai` (Microsoft Agent Framework). To pick up newer trace capabilities, update those pins and rebuild.
 
 📖 **Learn More:**
 - [Register a custom agent in Foundry Control Plane](https://learn.microsoft.com/en-us/azure/foundry/control-plane/register-custom-agent)
@@ -732,7 +737,7 @@ azd env get-values
 <summary><b>Docker Compose (Local Quick Start)</b></summary>
 
 `docker compose up --build` starts **6 containers** — the FastAPI orchestrator,
-4 independent MAF agent containers, and the Next.js frontend.
+4 independent agent containers, and the Next.js frontend.
 
 **Build and start containers:**
 
@@ -964,7 +969,7 @@ az group delete --name prior-auth-rg --yes --no-wait
 
 All environment variables used by the application, organized by purpose.
 
-### Microsoft Foundry (MAF Agent Routing)
+### Microsoft Foundry (Hosted Agent Routing)
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -990,7 +995,7 @@ All environment variables used by the application, organized by purpose.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 
-> **Note:** MCP server connections (NPI, ICD-10, CMS, PubMed, ClinicalTrials) are managed by Foundry Agent Service as project-level tool connections, created automatically by `scripts/register_agents.py` during `azd up`. No `MCP_*` environment variables are needed — MCP tools are visible in the Foundry portal under **Build → Tools**.
+> **Note:** MCP tools (NPI, ICD-10, CMS, PubMed, ClinicalTrials) are delivered through the Foundry toolboxes `clinical-tools` and `coverage-tools`, created automatically by `scripts/create_toolbox.py` during `azd up`. The backing self-hosted medical-data MCP server is provisioned by `azd`, and `MEDICAL_MCP_BASE_URL` is a Bicep output wired through automatically — you do not set any MCP URLs by hand. The matching project-level MCP connections (created by `scripts/register_agents.py`) are visible in the Foundry portal under **Build → Tools**.
 
 ### How Variables Flow in Azure Deployment
 
@@ -1023,7 +1028,7 @@ FRONTEND_ORIGIN                  →    FRONTEND_ORIGIN
 | **Issue** | **Cause** | **Solution** |
 |-----------|-----------|--------------|
 | Backend health check fails | Port mismatch or dependency error | Check logs: `docker compose logs backend` |
-| MCP server timeouts | Network/firewall blocking MCP endpoints | Verify outbound HTTPS access to `mcp.deepsense.ai` and `pubmed.mcp.claude.com` |
+| MCP tool timeouts | Toolbox or medical-data MCP server unreachable | Verify the toolboxes are healthy: `python scripts/create_toolbox.py --verify`. Confirm the medical-data MCP Container App is running and `MEDICAL_MCP_BASE_URL` is set in the azd env |
 | Frontend shows CORS error | `FRONTEND_ORIGIN` mismatch | Set `FRONTEND_ORIGIN` to match the frontend's URL |
 | Container build fails | Docker not running | Start Docker Desktop and retry |
 | Azure quota exceeded | Insufficient gpt-5.4 model quota | Check quota in Microsoft Foundry under **Build → Deployments** (see Step 1.3) |

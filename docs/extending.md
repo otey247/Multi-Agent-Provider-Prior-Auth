@@ -4,7 +4,26 @@
 
 The multi-agent pipeline can be extended with additional agent roles (e.g., a
 Pharmacy Benefits agent, Prior Treatment Verification agent, or Financial
-Review agent). Each agent follows a consistent pattern across seven files:
+Review agent). Each agent is a Foundry Hosted Agent served on the
+`azure-ai-agentserver` Responses protocol host (`ResponsesAgentServerHost`,
+protocol version `1.0.0`) against the `gpt-5.4` model.
+
+There are two agent styles in the solution — pick the one that matches your
+agent's needs:
+
+- **Tool-using agent** (like `clinical-reviewer-agent` / `coverage-assessment-agent`):
+  drives the model with the OpenAI SDK directly — `client.responses.parse(text_format=<PydanticModel>)`
+  against `{AZURE_AI_PROJECT_ENDPOINT}/openai/v1` — and consumes MCP tools through
+  a **Foundry Toolbox** (see *Add a New MCP Server*). It inlines its
+  `skills/<name>/SKILL.md` into the system prompt at startup.
+- **Reasoning-only agent** (like `compliance-agent` / `synthesis-agent`): uses the
+  Microsoft Agent Framework (`agent_framework`) — `AzureOpenAIResponsesClient`
+  for the model call and `SkillsProvider` to load its SKILL.md, with
+  `default_options={"response_format": <PydanticModel>}` for structured output.
+  No tools.
+
+Both styles authenticate with `DefaultAzureCredential` (managed identity in the
+hosted runtime, `az` CLI credential locally) — no API keys.
 
 **Step 1 — Agent container** (`agents/new-agent/main.py` + `agents/new-agent/schemas.py`):
 
@@ -23,16 +42,23 @@ class NewAgentResult(BaseModel):
     summary: Optional[str] = None
 ```
 
-**`agents/new-agent/main.py`** — MAF agent wiring:
+**`agents/new-agent/main.py`** — for a **reasoning-only agent** (Microsoft Agent Framework), follow `agents/compliance/main.py` / `agents/synthesis/main.py`:
 
 ```python
+import inspect
+import json
 import os
 from pathlib import Path
+from typing import Any
 
-import httpx
-from agent_framework import MCPStreamableHTTPTool, SkillsProvider
+from agent_framework import SkillsProvider
 from agent_framework.azure import AzureOpenAIResponsesClient
-from azure.ai.agentserver.agentframework import from_agent_framework
+from azure.ai.agentserver.responses import (
+    CreateResponse,
+    ResponseContext,
+    ResponsesAgentServerHost,
+    TextResponse,
+)
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 
@@ -40,45 +66,40 @@ from schemas import NewAgentResult
 
 load_dotenv(override=True)  # override=True required for Foundry-deployed env vars
 
-# MCP tools call servers directly via MCPStreamableHTTPTool.
-# Foundry project connections exist for portal visibility but agents
-# are registered with tools=[] (see scripts/register_agents.py).
-_MCP_HTTP_CLIENT = httpx.AsyncClient(
-    headers={"User-Agent": "claude-code/1.0"},
-    timeout=httpx.Timeout(60.0),
-)
-
 
 def main() -> None:
-    # Wire MCP tools via MCPStreamableHTTPTool (direct HTTP from container)
-    # MCP_* env vars are set in register_agents.py and agent.yaml
-    new_tool = MCPStreamableHTTPTool(
-        name="new-server",
-        description="Description of what this MCP server does",
-        url=os.environ["MCP_NEW_SERVER"],
-        http_client=_MCP_HTTP_CLIENT,
-        load_prompts=False,
-    )
-
     skills_provider = SkillsProvider(
         skill_paths=str(Path(__file__).parent / "skills")
     )
 
+    # default_options enforces NewAgentResult schema on every agent.run() call
+    # made by the Responses protocol handler — token-level JSON constraint.
     agent = AzureOpenAIResponsesClient(
         project_endpoint=os.environ["AZURE_AI_PROJECT_ENDPOINT"],
         deployment_name=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
         credential=DefaultAzureCredential(),
     ).as_agent(
         name="new-agent",
-        id="new-agent",  # Must match name used in register_agents.py for Foundry Traces
+        id="new-agent",  # Must match registered agent name for Foundry Traces correlation
         instructions="You are a ... agent for prior authorization requests.",
-        tools=[new_tool],                             # omit if no MCP
+        tools=[],
         context_providers=[skills_provider],
         default_options={"response_format": NewAgentResult},
     )
 
-    app = from_agent_framework(agent)
-    _patch_trace_agent_id(app, "new-agent")  # Fix gen_ai.agent.id for Foundry Traces
+    # agentserver-core 2.x serves the Responses protocol via ResponsesAgentServerHost.
+    app = ResponsesAgentServerHost()
+
+    @app.response_handler
+    async def handle_response(request: CreateResponse, context: ResponseContext, cancellation_signal):
+        input_text = await context.get_input_text() or ""
+        result = agent.run(input_text)
+        if inspect.isawaitable(result):
+            result = await result
+        # extract JSON from the run result (see _agent_result_to_text in the
+        # existing agents for the full helper)
+        return TextResponse(context, request, text=result.model_dump_json())
+
     app.run()
 
 
@@ -86,15 +107,24 @@ if __name__ == "__main__":
     main()
 ```
 
+For a **tool-using agent** (OpenAI SDK + Foundry Toolbox), follow
+`agents/clinical/main.py` / `agents/coverage/main.py`: inline the SKILL.md into
+the system prompt, resolve the toolbox endpoint from `TOOLBOX_ENDPOINT`, open the
+managed-identity-authenticated `AsyncOpenAI(base_url={AZURE_AI_PROJECT_ENDPOINT}/openai/v1, api_key=<bearer token>)`
+client, and call `run_with_toolbox(...)` (in `agents/clinical/mcp_toolbox.py`,
+copied per tool-using agent) which drives `client.responses.parse(text_format=<PydanticModel>)`
+in a tool-calling loop against the toolbox's tools. Wrap the run so any failure
+degrades to a schema-valid HTTP 200 fallback (the hosted runtime must never see a 500).
+
 Key conventions:
-- `schemas.py` declares the Pydantic output model; MAF enforces it at inference time (no JSON parsing needed)
-- Import `AzureOpenAIResponsesClient` from `agent_framework.azure`, **not** from `azure.ai.agentserver`
-- Constructor takes `project_endpoint` + `deployment_name` + `credential=DefaultAzureCredential()` — no API keys
-- `name`, `instructions`, `tools`, `context_providers`, and `default_options` all go on `.as_agent()`, not the constructor
-- `SkillsProvider` is passed via `context_providers=[skills_provider]` in `.as_agent()`
-- MCP tools are managed by Foundry as project tool connections — no `MCPStreamableHTTPTool` or `httpx` wiring needed in agent code; see `scripts/register_agents.py` for how to add new MCP tools
+- `schemas.py` declares the Pydantic output model; structured output is enforced at the token level (no JSON-fence parsing) — via `default_options={"response_format": ...}` for MAF agents, or `responses.parse(text_format=...)` for OpenAI-SDK agents
+- MAF agents import `AzureOpenAIResponsesClient` from `agent_framework.azure`; its constructor takes `project_endpoint` + `deployment_name` + `credential=DefaultAzureCredential()`, and `name`/`instructions`/`tools`/`context_providers`/`default_options` go on `.as_agent()`
+- `SkillsProvider(skill_paths=.../skills)` loads SKILL.md for MAF agents; OpenAI-SDK agents inline the SKILL.md text directly into the system prompt at startup
+- Tool-using agents consume MCP tools through a **Foundry Toolbox** (an MCP endpoint on the project domain), not by calling public servers directly — see *Add a New MCP Server*
 - `load_dotenv(override=True)` is required — `override=True` ensures Foundry-injected env vars take precedence
-- `from_agent_framework(agent).run()` exposes the agent as a `POST /responses` HTTP endpoint
+- The agent is served as a `POST .../responses` HTTP endpoint by `ResponsesAgentServerHost().run()`
+- The agent's `id` / `name` must match the name used in `scripts/register_agents.py` so Foundry Traces correlate
+- `main()` bridges the `MONITORING_CONNECTION_STRING` env var to `APPLICATIONINSIGHTS_CONNECTION_STRING` and sets `OTEL_SERVICE_NAME` for telemetry
 - Agents that need upstream results receive them as JSON in the request payload
 
 **Step 2 — SKILL.md** (`agents/new-agent/skills/new-agent/SKILL.md`):
@@ -109,7 +139,7 @@ One-liner describing what this agent does.
 [Same content as NEW_AGENT_INSTRUCTIONS — keep synced]
 
 ### Available MCP Tools (if applicable)
-- `mcp__server-name__tool_name(param)` — Description
+- `tool_name(param)` — Description (the model sees toolbox tools as `{server_label}___{tool_name}`)
 
 ### Output Format
 Return JSON:
@@ -127,23 +157,15 @@ Before completing, verify:
 - Do NOT make final approval/denial decisions (synthesis agent does that)
 ```
 
-**Step 3 — MCP tool registration** (`scripts/register_agents.py`):
+**Step 3 — MCP tools** (Foundry Toolbox):
 
-If the agent uses MCP servers, add a Foundry MCPTool connection in `scripts/register_agents.py`:
-
-1. Add the MCP server to `MCP_CONNECTIONS` (with Key-based auth if the server requires custom headers):
-```python
-{"name": "new-server", "url": "https://mcp.example.com/new-server/mcp",
- "auth": "CustomKeys", "keys": {"User-Agent": "claude-code/1.0"}},
-```
-
-2. Add an `MCPTool` reference to the agent's `tools` list:
-```python
-MCPTool(server_label="new-server", server_url="https://mcp.example.com/new-server/mcp",
-        require_approval="never", project_connection_id="new-server"),
-```
-
-The connection is created automatically during `azd up` and appears in the Foundry portal under **Build → Tools**.
+If the agent uses MCP tools, expose them through a **Foundry Toolbox** rather than
+registering tools on the agent itself (the agent is always registered with
+`tools=[]`). See *Add a New MCP Server* below for the full flow: add the tool to a
+reachable MCP server, declare a toolbox in `scripts/create_toolbox.py`, and inject
+the toolbox's `TOOLBOX_ENDPOINT` into the agent's env in `scripts/register_agents.py`.
+`scripts/register_agents.py` also creates MCP project connections (in `MCP_CONNECTIONS`)
+for portal visibility under **Build → Tools**, created idempotently during `azd up`.
 
 **Step 4 — Orchestrator** (`backend/app/agents/orchestrator.py`):
 
@@ -219,14 +241,16 @@ Update `_build_audit_trail()`, `_generate_audit_justification()`, and
 
 | File | Change |
 |------|--------|
-| `agents/new-agent/main.py` | New file: MAF agent, MCPStreamableHTTPTool wiring, `from_agent_framework` |
-| `agents/new-agent/schemas.py` | New file: Pydantic output model (must match SKILL.md output format exactly — MAF enforces schema at token level) |
+| `agents/new-agent/main.py` | New file: Responses host (`ResponsesAgentServerHost`) wiring. MAF (`AzureOpenAIResponsesClient` + `SkillsProvider`) for a reasoning-only agent, or OpenAI SDK + `mcp_toolbox.run_with_toolbox` for a tool-using agent |
+| `agents/new-agent/mcp_toolbox.py` | New file (tool-using agents only): per-request Foundry Toolbox MCP client + `responses.parse` tool-calling loop (copy from `agents/clinical/mcp_toolbox.py`) |
+| `agents/new-agent/schemas.py` | New file: Pydantic output model (must match SKILL.md output format exactly — enforced at token level) |
 | `agents/new-agent/skills/new-agent/SKILL.md` | New file: skill instructions |
 | `agents/new-agent/Dockerfile` | New file: container image |
-| `agents/new-agent/requirements.txt` | New file: `agent-framework-core>=1.0.0rc2,<=1.0.0rc3`, `azure-ai-agentserver-core>=1.0.0b16`, `azure-ai-agentserver-agentframework>=1.0.0b16`, `azure-identity`, `python-dotenv`, `httpx` (note: `azure-ai-projects` is resolved transitively) |
+| `agents/new-agent/requirements.txt` | New file. MAF agent: `agent-framework-core`, `agent-framework-azure-ai`, `azure-ai-agentserver-core==2.0.0b6`, `azure-ai-agentserver-responses==1.0.0b7`, `azure-identity`, `python-dotenv`. Tool-using agent: `azure-ai-agentserver-core==2.0.0b6`, `azure-ai-agentserver-responses==1.0.0b7`, `openai`, `mcp`, `azure-identity`, `pydantic`, `python-dotenv` |
 | `docker-compose.yml` | Add new agent service + env vars |
 | `agents/new-agent/agent.yaml` | New file: Foundry Hosted Agent descriptor (name, runtime, resources, env vars) |
-| `scripts/register_agents.py` | Add new agent to the registration list + MCPTool connections |
+| `scripts/register_agents.py` | Add new agent to the registration list (with `tools=[]`, env incl. `TOOLBOX_ENDPOINT` if tool-using); add any new MCP project connections |
+| `scripts/create_toolbox.py` | Add/extend a Foundry Toolbox (tool-using agents only) |
 | `backend/app/models/schemas.py` | Add matching Pydantic model (must stay in sync with `agents/new-agent/schemas.py`) |
 | `azure.yaml` | Add `az acr build` call for the new agent image in the postprovision hook |
 | `backend/app/config.py` | Add `HOSTED_AGENT_NEW_NAME` setting (Foundry agent name) and optionally `NEW_AGENT_URL` (docker-compose URL) |
@@ -240,60 +264,90 @@ Update `_build_audit_trail()`, `_generate_audit_justification()`, and
 
 ## Add a New MCP Server
 
-Each agent calls MCP servers directly via `MCPStreamableHTTPTool`. Three places
-need changes:
+Hosted Foundry agents can reach the Foundry **project domain** but not arbitrary
+public internet, so MCP tools are consumed through a **Foundry Toolbox**: a
+managed MCP endpoint on the project domain (`{project_endpoint}/toolboxes/{name}/mcp?api-version=v1`)
+that Foundry proxies out to the real MCP servers from its own network. The
+tool-using agents (`clinical`/`coverage`) connect to the toolbox as MCP clients
+with the managed-identity bearer token plus the header
+`Foundry-Features: Toolboxes=V1Preview`. Tools are exposed to the model as
+`{server_label}___{tool_name}` (e.g. `icd10___validate_code`).
 
-**Step 1 — Register the MCP connection** (`scripts/register_agents.py`):
+The backing MCP servers are the self-hosted **medical-data** server
+(`mcp-servers/medical-data/server.py`, deployed as an Azure Container App; wraps
+free public APIs — NLM Clinical Tables for ICD-10, ClinicalTrials.gov v2, CMS
+NPPES for NPI, and the CMS Coverage API) and **PubMed**
+(`https://pubmed.mcp.claude.com/mcp`, unauthenticated).
 
-Add the new MCP server to `MCP_CONNECTIONS` (for portal visibility) and add the
-`MCP_*` env var to the agent's env dict:
+**Step 1 — Add the tool to a backing MCP server** (`mcp-servers/medical-data/server.py`):
+
+Add a `@<domain>.tool()`-decorated async function to the relevant `FastMCP`
+instance (or mount a new domain on its own `/<path>/mcp` route). Each tool wraps
+a reachable upstream API and returns a JSON-serializable dict:
 
 ```python
-# In MCP_CONNECTIONS list (portal visibility):
-{"name": "cpt-validator", "url": "https://mcp.example.com/cpt-validator/mcp",
- "auth": "CustomKeys", "keys": {"User-Agent": "claude-code/1.0"}},
-
-# In the agent's env dict:
-"MCP_CPT_VALIDATOR": "https://mcp.example.com/cpt-validator/mcp",
+@cms.tool()
+async def lookup_cpt(code: str) -> dict[str, Any]:
+    """Get description and RVU value for a CPT/HCPCS code."""
+    try:
+        ...
+    except Exception as exc:  # noqa: BLE001
+        return _err({"code": code}, exc)
 ```
 
-**Step 2 — Agent container** (`agents/<target-agent>/main.py`):
+(If the tool lives on a different reachable MCP server, point the toolbox at that
+server's URL in Step 2 instead.)
 
-Add a `MCPStreamableHTTPTool` instance and pass it to `.as_agent(tools=[...])`:
+**Step 2 — Add it to a Foundry Toolbox** (`scripts/create_toolbox.py`):
+
+Add the backing server to the appropriate toolbox in `_toolboxes()` (or create a
+new toolbox). The medical-data domains are referenced via the
+`MEDICAL_MCP_BASE_URL` base:
 
 ```python
-cpt_tool = MCPStreamableHTTPTool(
-    name="cpt-validator",
-    description="Validate CPT codes and get RVU values",
-    url=os.environ["MCP_CPT_VALIDATOR"],
-    http_client=_MCP_HTTP_CLIENT,
-    load_prompts=False,
-)
-
-# Add to the tools list:
-agent = AzureOpenAIResponsesClient(...).as_agent(
-    tools=[existing_tool, cpt_tool],
+return {
+    "coverage-tools": [
+        _mcp("npi", f"{base}/npi/mcp"),
+        _mcp("cms_coverage", f"{base}/cms_coverage/mcp"),
+        # new server backing the toolbox:
+        _mcp("cpt_validator", f"{base}/cpt_validator/mcp"),
+    ],
     ...
-)
+}
 ```
 
-**Step 3 — SKILL.md** (`agents/<target-agent>/skills/<skill-name>/SKILL.md`):
+Run `python scripts/create_toolbox.py` to create/update + verify the toolbox.
+
+**Step 3 — Wire the toolbox into the consuming agent** (`scripts/register_agents.py`):
+
+The agent already receives `TOOLBOX_ENDPOINT` (its toolbox MCP URL) in its env
+dict; once a tool is in that toolbox it is discovered automatically (the agent
+lists the toolbox's tools at request time). If you created a *new* toolbox, set
+the agent's `TOOLBOX_ENDPOINT` to it. Optionally add a corresponding entry to
+`MCP_CONNECTIONS` for portal visibility under **Build → Tools**.
+
+**Step 4 — SKILL.md** (`agents/<target-agent>/skills/<skill-name>/SKILL.md`):
+
+Document the new tool and update the agent's `_BASE_INSTRUCTIONS` server/tool
+list in `agents/<target-agent>/main.py` so the model knows it exists:
 
 ```markdown
-#### CPT Validator MCP (cpt-validator)
-- `mcp__cpt-validator__validate_cpt(code)` — Check if CPT code is valid
-- `mcp__cpt-validator__lookup_cpt(code)` — Get description and RVU value
+#### CPT Validator (cpt_validator)
+- `validate_cpt(code)` — Check if CPT code is valid
+- `lookup_cpt(code)` — Get description and RVU value
 ```
 
-**Step 4 — Orchestrator** (only if adding a new agent role).
+**Step 5 — Orchestrator** (only if adding a new agent role).
 
 **Architecture summary:**
 
 ```
-scripts/register_agents.py           → MCP_CONNECTIONS (portal visibility) + MCP_* env vars
-agents/<agent>/main.py               → MCPStreamableHTTPTool instantiation (direct HTTP)
-agents/<agent>/skills/*/SKILL.md     → Usage instructions for the agent
-backend/app/agents/orchestrator.py   → Pipeline phases (only if adding a new agent role)
+mcp-servers/medical-data/server.py   → tool implementation (wraps a public API)
+scripts/create_toolbox.py            → Foundry Toolbox that proxies to the server
+scripts/register_agents.py           → TOOLBOX_ENDPOINT env var + MCP_CONNECTIONS (portal)
+agents/<agent>/main.py               → consumes the toolbox as an MCP client per request
+agents/<agent>/skills/*/SKILL.md     → usage instructions for the agent
+backend/app/agents/orchestrator.py   → pipeline phases (only if adding a new agent role)
 ```
 
 ---
@@ -327,35 +381,36 @@ Edit `_KNOWN_CODES` in `backend/app/services/cpt_validation.py`.
 
 ## Use MCP with Foundry Hosted Agents
 
-MCP tools are registered as Foundry project tool connections via `scripts/register_agents.py`.
-To test an MCP tool directly, use the Foundry-managed approach:
+Tool-using agents consume MCP tools through a **Foundry Toolbox** — an MCP
+endpoint on the project domain that proxies to the backing servers. The agent
+connects to the toolbox as an MCP **client** (the toolbox endpoint cannot be
+passed to the Responses API as a `type: mcp` `server_url`). To test a toolbox
+directly, open an MCP session against its endpoint with the managed-identity
+bearer token and the preview header — the same pattern `scripts/create_toolbox.py`
+uses to verify each toolbox:
 
 ```python
-from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import PromptAgentDefinition, MCPTool
 from azure.identity import DefaultAzureCredential
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
-client = AIProjectClient(endpoint=PROJECT_ENDPOINT, credential=DefaultAzureCredential())
-openai = client.get_openai_client()
+credential = DefaultAzureCredential()
+token = credential.get_token("https://ai.azure.com/.default").token
+url = f"{PROJECT_ENDPOINT}/toolboxes/coverage-tools/mcp?api-version=v1"
+headers = {"Authorization": f"Bearer {token}", "Foundry-Features": "Toolboxes=V1Preview"}
 
-# Create a test agent with the MCP tool
-agent = client.agents.create_version(
-    agent_name="test-agent",
-    definition=PromptAgentDefinition(
-        model="gpt-5.4",
-        instructions="Use the NPI tool to validate provider numbers.",
-        tools=[MCPTool(server_label="npi", server_url="https://mcp.deepsense.ai/npi_registry/mcp",
-                       require_approval="never", project_connection_id="npi-registry")],
-    ),
-)
-
-response = openai.responses.create(
-    input="Validate NPI 1234567893",
-    extra_body={"agent_reference": {"name": "test-agent", "type": "agent_reference"}},
-)
-print(response.output_text)
+async with streamablehttp_client(url, headers=headers) as (read, write, _):
+    async with ClientSession(read, write) as session:
+        await session.initialize()
+        names = [t.name for t in (await session.list_tools()).tools]
+        result = await session.call_tool("npi___npi_validate", {"npi": "1912084401"})
+        print(names, result.content[0].text)
 ```
-In the current architecture, all MCP tools are called directly from agent containers via `MCPStreamableHTTPTool`. Foundry project connections exist for portal visibility but agents are registered with `tools=[]`.
+
+The agent then drives the model with `client.responses.parse(text_format=<PydanticModel>)`
+in a tool-calling loop, calling the toolbox's tools as the model requests them
+(see `agents/clinical/mcp_toolbox.py`). The agents themselves are registered with
+`tools=[]`; the toolbox endpoint is injected via the `TOOLBOX_ENDPOINT` env var.
 
 ---
 

@@ -60,7 +60,7 @@ useful for programmatic/API integrations that don't need progress updates.
 ```json
 {
   "request_id": "uuid",
-  "recommendation": "approve",
+  "recommendation": "ready_to_submit",
   "confidence": 0.87,
   "confidence_level": "HIGH",
   "summary": "All three agents report clean findings...",
@@ -178,7 +178,7 @@ List all completed reviews (most recent first).
   {
     "request_id": "uuid",
     "patient_name": "John Smith",
-    "recommendation": "approve",
+    "recommendation": "ready_to_submit",
     "confidence_level": "HIGH",
     "reviewed_at": "2026-02-13T10:30:45Z",
     "decision_made": false
@@ -209,7 +209,7 @@ Generates an authorization number and notification letter.
 {
   "request_id": "uuid",
   "action": "override",
-  "override_recommendation": "approve",
+  "override_recommendation": "ready_to_submit",
   "override_rationale": "Clinical evidence supports approval despite agent uncertainty...",
   "reviewer_name": "Dr. Jane Doe"
 }
@@ -221,12 +221,12 @@ Generates an authorization number and notification letter.
 {
   "request_id": "uuid",
   "authorization_number": "PA-20260213-00001",
-  "final_recommendation": "approve",
+  "final_recommendation": "ready_to_submit",
   "decided_by": "Dr. Jane Doe",
   "decided_at": "2026-02-13T11:05:00Z",
   "was_overridden": true,
   "override_rationale": "Clinical evidence supports approval despite agent uncertainty...",
-  "original_recommendation": "pend_for_review",
+  "original_recommendation": "needs_review",
   "letter": {
     "authorization_number": "PA-20260213-00001",
     "letter_type": "approval",
@@ -259,8 +259,8 @@ contains a regenerated audit PDF with Section 9 ("Clinician Override Record").
 
 These endpoints expose each agent individually for per-agent evaluation,
 red-teaming, integration testing, and future microservices migration.
-The orchestrator calls the equivalent hosted agent containers directly over HTTP
-when running the full pipeline.
+The orchestrator dispatches to the equivalent Foundry Hosted Agents over their
+Responses-protocol endpoints when running the full pipeline.
 
 All per-agent responses share a common envelope:
 

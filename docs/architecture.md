@@ -24,20 +24,23 @@ The application uses a **pure HTTP dispatch** architecture. The FastAPI backend 
 │ - Audit/PDF generation                                            │
 └───────────────┬───────────────────────────────┬────────────────────┘
                 │                               │
-  POST */responses               │ OpenTelemetry
-  (Foundry Responses API)        │
+  POST agent Responses endpoint  │ OpenTelemetry
+  (Foundry Hosted Agents)        │
 ┌───────────────▼───────────────────────────────────────────────┐
-│ Microsoft Foundry Agent Service                               │
-│ - Compliance Agent                                            │
-│ - Clinical Agent                                              │
-│ - Coverage Agent                                              │
-│ - Synthesis Agent                                             │
+│ Microsoft Foundry Hosted Agents (gpt-5.4)                     │
+│ - Compliance Agent   (pure LLM, no tools)                     │
+│ - Clinical Reviewer Agent  ─┐ tool-calling                    │
+│ - Coverage Assessment Agent ┘ via Foundry Toolbox             │
+│ - Synthesis Agent    (pure LLM, no tools)                     │
 │ - Native evaluation / lifecycle / control-plane visibility    │
 └───────────────┬───────────────────────────────────────────────┘
-                │ MCP tools / model runtime
+                │ MCP client (clinical-tools / coverage-tools toolbox)
 ┌───────────────▼───────────────────────────────────────────────┐
-│ MCP servers + Azure OpenAI gpt-5.4 endpoint                  │
-│ NPI Registry • ICD-10 • CMS Coverage • Clinical Trials • PubMed │
+│ Foundry Toolbox (managed MCP endpoint on project domain)      │
+│ proxies out to:                                               │
+│   • medical-data MCP container app (ICD-10 • Clinical Trials  │
+│     • NPI • CMS Coverage)                                     │
+│   • PubMed (pubmed.mcp.claude.com)                            │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -53,36 +56,42 @@ prior-auth-maf/
 │   │   └── models/        # Pydantic schemas (schemas.py)
 │   └── Dockerfile
 │
-├── agents/                # Four independent MAF Hosted Agent deployable units
-│   ├── clinical/          # ICD-10, PubMed, Clinical Trials MCP — port 8001
-│   │   ├── main.py        # from_agent_framework entry point + structured output via default_options
+├── agents/                # Four independent Foundry Hosted Agent deployable units
+│   ├── clinical/          # ICD-10, PubMed, Clinical Trials via clinical-tools toolbox
+│   │   ├── main.py        # azure-ai-agentserver host + responses.parse(text_format=ClinicalResult)
+│   │   ├── mcp_toolbox.py # MCP client to the Foundry Toolbox + tool-calling loop
 │   │   ├── schemas.py     # Pydantic output model (ClinicalResult)
 │   │   ├── Dockerfile
 │   │   ├── agent.yaml     # Foundry Hosted Agent descriptor
 │   │   └── skills/clinical-review/SKILL.md
-│   ├── coverage/          # NPI Registry, CMS Coverage MCP — port 8002
+│   ├── coverage/          # NPI Registry, CMS Coverage via coverage-tools toolbox
 │   │   ├── main.py
+│   │   ├── mcp_toolbox.py
 │   │   ├── schemas.py     # Pydantic output model (CoverageResult)
 │   │   ├── Dockerfile
 │   │   ├── agent.yaml
 │   │   └── skills/coverage-assessment/SKILL.md
-│   ├── compliance/        # No MCP tools — pure reasoning — port 8003
+│   ├── compliance/        # No tools — pure LLM reasoning
 │   │   ├── main.py
 │   │   ├── schemas.py     # Pydantic output model (ComplianceResult)
 │   │   ├── Dockerfile
 │   │   ├── agent.yaml
 │   │   └── skills/compliance-review/SKILL.md
-│   └── synthesis/         # No MCP tools — gate-based synthesis — port 8004
+│   └── synthesis/         # No tools — gate-based synthesis (pure LLM)
 │       ├── main.py
 │       ├── schemas.py     # Pydantic output model (SynthesisOutput)
 │       ├── Dockerfile
 │       ├── agent.yaml
 │       └── skills/synthesis-decision/SKILL.md
 │
+├── mcp-servers/
+│   └── medical-data/      # Self-hosted MCP server (ICD-10, Clinical Trials, NPI, CMS Coverage)
+│       └── server.py
 ├── frontend/              # Next.js UI
 ├── scripts/               # Post-provision helpers
-│   ├── register_agents.py # Registers all 4 agents with Foundry Hosted Agents
-│   └── check_agents.py   # Pre-flight health check — agents, App Insights, MCP, backend, frontend
+│   ├── register_agents.py # Registers all 4 agents + creates MCP project connections
+│   ├── create_toolbox.py  # Creates the clinical-tools / coverage-tools Foundry Toolboxes
+│   └── check_agents.py    # Pre-flight health check — agents, App Insights, MCP, backend, frontend
 ├── docs/                  # Architecture, deployment guide, API reference
 ├── infra/                 # Bicep / azd infrastructure
 └── docker-compose.yml     # Local: backend + 4 agents + frontend
@@ -155,12 +164,19 @@ In the production-integrated pattern, the same review can be triggered:
 3. The **Orchestrator** runs a pre-flight check and then dispatches the
     four specialist agents. `hosted_agents.py` uses a **two-mode dispatcher**:
     - **Docker Compose (local dev):** direct `POST {HOSTED_AGENT_*_URL}/responses` to each agent container over the Docker bridge network.
-    - **Foundry Hosted Agents (production):** Uses `AIProjectClient.get_openai_client()` → `responses.create()` with `extra_body` containing both `agent_reference` for routing and a structured `input` message array matching the `from_agent_framework()` envelope format; authentication via `DefaultAzureCredential` (managed identity); the Foundry Agent Service routes to the correct registered agent.
+    - **Foundry Hosted Agents (production):** `POST {project_endpoint}/agents/{agentName}/endpoint/protocols/openai/responses?api-version=v1` — the agent name is part of the endpoint path, so no `agent_reference`, `model`, or `agent` is passed in the body. Authentication is via `DefaultAzureCredential` (the backend ACA managed identity), with header `Foundry-Features: HostedAgents=V1Preview`. The dispatcher parses both JSON and (defensively) SSE response bodies.
 
-    Each agent container runs MAF
-    `from_agent_framework(agent).run()` with `default_options={"response_format": PydanticModel}`
-    for token-level structured output. Results are parsed from `response.output_text`
-    as JSON.
+    Each agent container is built on the `azure-ai-agentserver` Responses
+    protocol host (protocol version `1.0.0`). The **Clinical Reviewer** and
+    **Coverage** agents drive the model with the OpenAI SDK via
+    `client.responses.parse(text_format=PydanticModel)` against
+    `{AZURE_AI_PROJECT_ENDPOINT}/openai/v1` (auth via the agent managed identity,
+    scope `https://ai.azure.com/.default`), running a tool-calling loop over their
+    Foundry Toolbox tools. The **Compliance** and **Synthesis** agents use the
+    Microsoft Agent Framework (`AzureOpenAIResponsesClient` with
+    `default_options={"response_format": PydanticModel}`) and call no tools. Both
+    paths enforce token-level structured output; the backend parses the result
+    JSON from the Responses output text.
 
    **Pre-flight — CPT/HCPCS Format Validation** (`cpt_validation.py`):
    - Validates procedure code format (5-digit CPT or letter+4 HCPCS)
@@ -194,66 +210,93 @@ In the production-integrated pattern, the same review can be triggered:
 
 ## MCP Integration
 
-All MCP tool calls are made **directly from the agent container** via `MCPStreamableHTTPTool`.
-Each agent's `main.py` creates tool instances with a shared `httpx.AsyncClient` (including
-the `User-Agent: claude-code/1.0` header required by DeepSense CloudFront). Tools are
-passed via `tools=[...]` to `.as_agent()` and called directly during inference.
+The clinical and coverage agents reach their MCP tools through **Foundry Toolboxes**.
+A Foundry Toolbox is a managed MCP endpoint *on the Foundry project domain*
+(`{project_endpoint}/toolboxes/{name}/mcp?api-version=v1`) that proxies out to the
+backing MCP servers from Foundry's own network. Hosted agents can reach the Foundry
+project domain but not arbitrary public internet, so the toolbox is the bridge.
 
-> **Note:** `scripts/register_agents.py` also creates Foundry project connections for
-> portal visibility (**Build → Tools**), but agents are registered with `tools=[]` —
-> `MCPTool` definitions on `HostedAgentDefinition` are disabled because the Foundry
-> `tools/resolve` API is not yet available in all regions. MCP tools are handled
-> entirely by in-container `MCPStreamableHTTPTool`.
+The agent consumes the toolbox as an **MCP client** (streamable-HTTP): it connects
+with its managed-identity bearer token plus the header
+`Foundry-Features: Toolboxes=V1Preview`, lists the toolbox's tools, and runs a
+tool-calling loop driven by `client.responses.parse(...)`. (The toolbox endpoint
+**cannot** be passed as a Responses API `type: mcp` `server_url` — it is consumed by
+an MCP client, not the model backend.) The MCP `ClientSession` is opened and closed
+inside a single request handler coroutine via `AsyncExitStack`; opening and tearing
+it down in the same task avoids cross-task anyio teardown errors.
 
-### PubMed Session Reconnect
+- **`clinical-tools`** backs the clinical agent: `icd10`, `pubmed`, `clinical_trials`.
+- **`coverage-tools`** backs the coverage agent: `npi`, `cms_coverage`.
 
-PubMed's MCP server (`pubmed.mcp.claude.com`) terminates idle sessions after
-~10 minutes. The clinical agent uses `_ReconnectingMCPTool` — a subclass of
-`MCPStreamableHTTPTool` that catches `McpError('Session terminated')` and
-automatically reconnects with a fresh session. Other MCP servers (DeepSense)
-do not have aggressive session TTLs and use standard `MCPStreamableHTTPTool`.
+Tools are exposed to the model as `{server_label}___{tool_name}`
+(e.g. `npi___npi_validate`, `icd10___validate_code`). All medical-data tools are
+read-only (search / validate / lookup), so toolboxes are created with
+`require_approval="never"`.
+
+### Tool-calling loop (reasoning-safe)
+
+gpt-5.x are reasoning models, so the loop continues each turn with
+`previous_response_id` (server-stored conversation + reasoning state) rather than
+re-sending the message list — a stateless input list would drop the reasoning items
+and error. If the tool budget (`max_iters`) is exhausted the agent forces a final
+structured answer without tools.
+
+### Resilience
+
+A tool or model failure never produces an HTTP 500 to Foundry. Each agent's request
+handler wraps the run in a `try/except`; on any failure it emits a schema-valid
+**degraded** result (a conservative manual-review payload) with HTTP 200, so the
+orchestrator always receives a parseable result.
 
 ### How MCP Tools Are Provisioned
 
-During `azd up`, the `scripts/register_agents.py` script:
+During `azd up`:
 
-1. **Creates project connections** via the ARM REST API (idempotent PUT) for each MCP server (portal visibility)
-2. **Registers agents** with `tools=[]` and `MCP_*` environment variables
-3. **Agent containers** use `MCPStreamableHTTPTool` to call MCP servers directly via the `MCP_*` URLs
+1. `scripts/register_agents.py` **creates Foundry MCP project connections** via the
+   ARM REST API (idempotent PUT) for each backing server (portal visibility under
+   **Build → Tools**) and **registers each agent**, injecting `TOOLBOX_ENDPOINT`
+   (and the `MCP_*` URLs the toolboxes point at) as environment variables.
+2. `scripts/create_toolbox.py` **creates/verifies the toolboxes** `clinical-tools`
+   and `coverage-tools`, then runs a representative read-only call against each to
+   prove the proxy reaches the backing servers.
 
 ```python
 # scripts/register_agents.py (simplified)
 
-from azure.ai.projects.models import HostedAgentDefinition
+toolbox_clinical = f"{project_endpoint}/toolboxes/clinical-tools/mcp?api-version=v1"
 
-# Agents are registered with tools=[] — MCP tool calls are handled
-# directly by MCPStreamableHTTPTool in each agent's main.py.
 agent = client.agents.create_version(
     agent_name="clinical-reviewer-agent",
     definition=HostedAgentDefinition(
         ...,
         environment_variables={
-            "MCP_ICD10_CODES": "https://mcp.deepsense.ai/icd10_codes/mcp",
+            "TOOLBOX_ENDPOINT": toolbox_clinical,
+            "MCP_ICD10_CODES": f"{MEDICAL_MCP_BASE_URL}/icd10/mcp",
             "MCP_PUBMED": "https://pubmed.mcp.claude.com/mcp",
-            "MCP_CLINICAL_TRIALS": "https://mcp.deepsense.ai/clinical_trials/mcp",
+            "MCP_CLINICAL_TRIALS": f"{MEDICAL_MCP_BASE_URL}/clinical_trials/mcp",
         },
-        tools=[],  # MCPTool defs disabled (tools/resolve API not GA in all regions)
+        tools=[],  # tools are consumed via the toolbox MCP client, not HostedAgentDefinition
     ),
 )
 ```
 
-### Authentication
+### Backing MCP servers
 
-| MCP Server | Provider | Auth Type | Header |
-|-----------|----------|-----------|--------|
-| ICD-10, ClinicalTrials, NPI, CMS | DeepSense | Key-based | `User-Agent: claude-code/1.0` |
-| PubMed | Anthropic | Unauthenticated | None |
+| Toolbox | Server label | Backing server | Auth |
+|---------|--------------|----------------|------|
+| `clinical-tools` | `icd10`, `clinical_trials` | Self-hosted medical-data MCP container app | None (read-only public data) |
+| `clinical-tools` | `pubmed` | `pubmed.mcp.claude.com` (Anthropic-hosted) | Unauthenticated |
+| `coverage-tools` | `npi`, `cms_coverage` | Self-hosted medical-data MCP container app | None (read-only public data) |
 
-Authentication headers are stored in Foundry project connections (Key-based auth)
-for portal visibility. Agent containers also handle MCP auth directly via
-a shared `httpx.AsyncClient` with the required `User-Agent` header.
+The self-hosted **medical-data** MCP server (Azure Container App; MCP Streamable HTTP,
+stateless, JSON responses) serves each domain on its own path — `/icd10/mcp`,
+`/clinical_trials/mcp`, `/npi/mcp`, `/cms_coverage/mcp`, plus `/health`. It is a thin
+wrapper over official free public APIs and holds no secrets:
 
-MCP tools are visible in the Foundry portal under **Build → Tools**.
+- **ICD-10** — NLM Clinical Tables (ICD-10-CM / PCS)
+- **Clinical Trials** — ClinicalTrials.gov API v2
+- **NPI** — CMS NPPES Registry API (local Luhn check + lookup/search)
+- **CMS Coverage** — CMS Coverage API (`api.coverage.cms.gov`, real NCD/LCD/Article data)
 
 ---
 
@@ -266,8 +309,8 @@ Each agent's execution is fully transparent in the frontend with Checks Summary 
 | Property | Value |
 |----------|-------|
 | **Role** | Documentation completeness validation |
-| **Tools** | None (pure reasoning) |
-| **`max_turns`** | 5 |
+| **Tools** | None (pure LLM reasoning) |
+| **Model call** | Microsoft Agent Framework `AzureOpenAIResponsesClient` with `default_options={"response_format": ComplianceResult}` |
 | **Input** | Raw PA request data |
 | **Output** | Checklist (10 items), missing items, additional-info requests |
 
@@ -291,9 +334,9 @@ Each agent's execution is fully transparent in the frontend with Checks Summary 
 | Property | Value |
 |----------|-------|
 | **Role** | Clinical data extraction, code validation, confidence scoring, clinical trials search |
-| **MCP Servers** | `icd10-codes`, `pubmed`, `clinical-trials` |
-| **Tools** | `validate_code`, `lookup_code`, `search_codes`, `get_hierarchy`, `get_by_category`, `get_by_body_system`, `search_articles` (PubMed), `search_trials`, `get_trial_details`, `search_by_eligibility`, `search_investigators`, `analyze_endpoints`, `search_by_sponsor` |
-| **`max_turns`** | 15 |
+| **Toolbox** | `clinical-tools` (server labels `icd10`, `pubmed`, `clinical_trials`) |
+| **Tools** | `icd10`: `validate_code`, `lookup_code`, `search_codes`, `get_hierarchy`; `pubmed`: `search_articles` and related PubMed tools; `clinical_trials`: `search_trials`, `get_trial_details` |
+| **Model call** | Reasoning-safe tool-calling loop (`max_iters=8`) via `responses.parse(text_format=ClinicalResult)` |
 
 **SKILL.md rules:**
 
@@ -303,8 +346,8 @@ Each agent's execution is fully transparent in the frontend with Checks Summary 
 | 2 | CPT/HCPCS Procedure Code Notation | (orchestrator pre-flight) | Pre-flight results |
 | 3 | Clinical Data Extraction | None (reasoning) | 8 sub-items |
 | 4 | Extraction Confidence Calculation | None (reasoning) | Low-confidence warning if < 60% |
-| 5 | PubMed Literature Search | `search_articles` (PubMed MCP) | Supplementary, non-blocking |
-| 6 | Clinical Trials Search | `search_trials`, `search_by_eligibility` | Supplementary, non-blocking |
+| 5 | PubMed Literature Search | `search_articles` (`pubmed`) | Supplementary, non-blocking |
+| 6 | Clinical Trials Search | `search_trials`, `get_trial_details` (`clinical_trials`) | Supplementary, non-blocking |
 | 7 | Clinical Summary Generation | None (reasoning) | Final structured narrative |
 
 ### Coverage Agent
@@ -312,9 +355,9 @@ Each agent's execution is fully transparent in the frontend with Checks Summary 
 | Property | Value |
 |----------|-------|
 | **Role** | Provider verification, coverage policy assessment, criteria mapping, diagnosis-policy alignment |
-| **MCP Servers** | `npi-registry`, `cms-coverage` |
-| **Tools** | `npi_validate`, `npi_lookup`, `npi_search`, `search_national_coverage`, `search_local_coverage`, `get_coverage_document`, `get_contractors`, `get_whats_new_report`, `batch_get_ncds`, `sad_exclusion_list` |
-| **`max_turns`** | 15 |
+| **Toolbox** | `coverage-tools` (server labels `npi`, `cms_coverage`) |
+| **Tools** | `npi`: `npi_validate`, `npi_lookup`, `npi_search`; `cms_coverage`: `search_national_coverage`, `search_local_coverage`, `get_coverage_document`, `get_contractors` |
+| **Model call** | Reasoning-safe tool-calling loop (`max_iters=8`) via `responses.parse(text_format=CoverageResult)` |
 
 **SKILL.md rules:**
 
@@ -324,7 +367,7 @@ Each agent's execution is fully transparent in the frontend with Checks Summary 
 | 1.4 | Provider Specialty-Procedure Appropriateness **(REQUIRED)** | `npi_lookup` taxonomy | Emitted as an explicit `criteria_assessment` entry: `MET`/`NOT_MET`/`INSUFFICIENT` based on NPI taxonomy vs. requested CPT category |
 | 2 | MAC Identification | `get_contractors` | State-based MAC lookup |
 | 3 | Coverage Policy Search | `search_national_coverage`, `search_local_coverage` | NCD and LCD searches |
-| 4 | Policy Detail Retrieval | `get_coverage_document`, `batch_get_ncds` | Full policy text |
+| 4 | Policy Detail Retrieval | `get_coverage_document` | Full policy text + covered/non-covered ICD-10 and HCPCS |
 | 5 | Clinical Evidence to Criteria Mapping | None (reasoning) | Per-criterion MET/NOT_MET/INSUFFICIENT |
 | 6 | Diagnosis-Policy Alignment **(AUDITABLE, REQUIRED)** | None (reasoning) | ICD-10 vs. policy indications |
 | 7 | Documentation Gap Analysis | None (reasoning) | Critical vs. non-critical |
@@ -338,9 +381,9 @@ Each agent's execution is fully transparent in the frontend with Checks Summary 
 
 | Property | Value |
 |----------|-------|
-| **Role** | Pre-flight CPT validation, coordinate agents, apply gate-based decision rubric |
-| **Tools** | CPT format validation (local), no MCP tools |
-| **`max_turns`** | 5 (synthesis agent) |
+| **Role** | Pre-flight CPT validation (orchestrator), coordinate agents, apply gate-based decision rubric |
+| **Tools** | CPT format validation (local, orchestrator pre-flight); synthesis agent itself has no tools (pure LLM) |
+| **Model call** | Microsoft Agent Framework `AzureOpenAIResponsesClient` with `default_options={"response_format": SynthesisOutput}` |
 | **Input** | All three agent reports + CPT validation results |
 | **Output** | APPROVE/PEND recommendation, confidence (0-1.0 + HIGH/MEDIUM/LOW), rationale, `synthesis_audit_trail` (gate_results + confidence_components), disclaimer |
 
@@ -427,30 +470,38 @@ The orchestrator generates a structured audit document (Markdown + PDF) with 8 s
 
 ---
 
-## Anthropic Healthcare MCP Servers
+## Medical-Data MCP Tools
 
-This project consumes **remote MCP servers** from the
-[anthropics/healthcare](https://github.com/anthropics/healthcare) marketplace.
+The self-hosted **medical-data** MCP server (Azure Container App) backs four of the
+five tool domains; PubMed is consumed from the Anthropic-hosted server. Agents reach
+all of them through the `clinical-tools` / `coverage-tools` Foundry Toolboxes.
 
-| MCP Server | Endpoint | Used By | Key Tools |
-|---|---|---|---|
-| **NPI Registry** | `mcp.deepsense.ai/npi_registry/mcp` | Coverage Agent | `npi_validate`, `npi_lookup`, `npi_search` |
-| **ICD-10 Codes** | `mcp.deepsense.ai/icd10_codes/mcp` | Clinical Agent | `validate_code`, `lookup_code`, `search_codes`, `get_hierarchy`, `get_by_category`, `get_by_body_system` |
-| **CMS Coverage** | `mcp.deepsense.ai/cms_coverage/mcp` | Coverage Agent | `search_national_coverage`, `search_local_coverage`, `get_coverage_document`, `get_contractors`, `get_whats_new_report`, `batch_get_ncds`, `sad_exclusion_list` |
-| **Clinical Trials** | `mcp.deepsense.ai/clinical_trials/mcp` | Clinical Agent | `search_trials`, `get_trial_details`, `search_by_eligibility`, `search_investigators`, `analyze_endpoints`, `search_by_sponsor` |
-| **PubMed** | `pubmed.mcp.claude.com/mcp` | Clinical Agent | `search_articles`, `get_article_metadata`, `find_related_articles`, `lookup_article_by_citation`, `convert_article_ids`, `get_full_text_article`, `get_copyright_status` |
+| Server label | Path / endpoint | Data source | Used by | Tools |
+|---|---|---|---|---|
+| `npi` | `<medical-data>/npi/mcp` | CMS NPPES Registry | Coverage Agent | `npi_validate`, `npi_lookup`, `npi_search` |
+| `cms_coverage` | `<medical-data>/cms_coverage/mcp` | CMS Coverage API (`api.coverage.cms.gov`) | Coverage Agent | `search_national_coverage`, `search_local_coverage`, `get_coverage_document`, `get_contractors` |
+| `icd10` | `<medical-data>/icd10/mcp` | NLM Clinical Tables (ICD-10-CM / PCS) | Clinical Agent | `validate_code`, `lookup_code`, `search_codes`, `get_hierarchy` |
+| `clinical_trials` | `<medical-data>/clinical_trials/mcp` | ClinicalTrials.gov API v2 | Clinical Agent | `search_trials`, `get_trial_details` |
+| `pubmed` | `pubmed.mcp.claude.com/mcp` | Anthropic-hosted PubMed MCP | Clinical Agent | `search_articles`, `get_article_metadata`, `find_related_articles`, `lookup_article_by_citation`, `convert_article_ids`, `get_full_text_article`, `get_copyright_status` |
+
+`<medical-data>` is the medical-data container app FQDN, injected at registration time
+via `MEDICAL_MCP_BASE_URL` (set by Bicep from the container app FQDN).
 
 ### How MCP Is Integrated
 
 ```
-agents/<name>/main.py     — MCPStreamableHTTPTool instances (direct HTTP to MCP servers)
-    ↓ passed via
-.as_agent(tools=[...])    — MAF wires tools into the agent for inference
-    ↓ hosted by
-from_agent_framework(agent).run()   — Exposes POST /responses endpoint
+agents/<name>/main.py + mcp_toolbox.py
+    │  MCP client (streamable-HTTP) → Foundry Toolbox
+    ▼
+{project_endpoint}/toolboxes/{clinical-tools|coverage-tools}/mcp?api-version=v1
+    │  Foundry proxies out from its own network
+    ▼
+medical-data MCP container app (icd10, clinical_trials, npi, cms_coverage)
+PubMed (pubmed.mcp.claude.com)
 
-scripts/register_agents.py — Creates Foundry project connections (portal visibility)
-                             Registers agents with tools=[] and MCP_* env vars
+scripts/register_agents.py — Creates Foundry MCP project connections (portal visibility),
+                             registers agents with TOOLBOX_ENDPOINT + MCP_* env vars
+scripts/create_toolbox.py  — Creates/verifies the clinical-tools / coverage-tools toolboxes
 ```
 
 ---
@@ -458,21 +509,25 @@ scripts/register_agents.py — Creates Foundry project connections (portal visib
 ## Skills-Based Architecture
 
 Agent behaviors are defined in SKILL.md files — domain experts can update clinical rules without code changes.
-SKILL.md files live alongside each agent container and are loaded at startup via MAF `SkillsProvider`:
+Each agent loads its `skills/<name>/SKILL.md` at startup; the skill body is the source of truth for the
+workflow. The Clinical Reviewer and Coverage agents read the file and inline it into the system prompt; the
+Compliance and Synthesis agents load it through the Microsoft Agent Framework `SkillsProvider`:
 
 ```python
-skills_provider = SkillsProvider(
-    skill_paths=str(Path(__file__).parent / "skills")
-)
+# Clinical Reviewer / Coverage — inline the skill into the system prompt
+system_prompt = _BASE_INSTRUCTIONS + "\n\n# Skill: clinical-review\n\n" + _load_skill()
+
+# Compliance / Synthesis — load the skill via the Microsoft Agent Framework
+skills_provider = SkillsProvider(...)
 ```
 
 ### Skills Overview
 
-| Skill | Directory | MCP Servers | Purpose |
-|-------|-----------|-------------|---------|
+| Skill | Directory | Toolbox | Purpose |
+|-------|-----------|---------|---------|
 | Compliance Review | `agents/compliance/skills/compliance-review/` | None | 10-item documentation completeness checklist (items 1-7 blocking; 8 plan type, 9 NCCI bundling, 10 service type — non-blocking) |
-| Clinical Review | `agents/clinical/skills/clinical-review/` | icd10-codes, pubmed, clinical-trials | Code validation, clinical extraction, low-confidence warning (< 60%), literature + trials |
-| Coverage Assessment | `agents/coverage/skills/coverage-assessment/` | npi-registry, cms-coverage | Provider verification, specialty-procedure match, policy search, criteria mapping, Diagnosis-Policy Alignment |
+| Clinical Review | `agents/clinical/skills/clinical-review/` | `clinical-tools` (icd10, pubmed, clinical_trials) | Code validation, clinical extraction, low-confidence warning (< 60%), literature + trials |
+| Coverage Assessment | `agents/coverage/skills/coverage-assessment/` | `coverage-tools` (npi, cms_coverage) | Provider verification, specialty-procedure match, policy search, criteria mapping, Diagnosis-Policy Alignment |
 | Synthesis Decision | `agents/synthesis/skills/synthesis-decision/` | None | Gate-based evaluation, weighted confidence, `synthesis_audit_trail` breakdown, final recommendation + disclaimer |
 
 ---
@@ -495,7 +550,7 @@ prior-auth-maf/
 │       │   ├── synthesis_agent.py        # HTTP dispatcher → Synthesis hosted agent
 │       │   └── orchestrator.py           # Multi-agent coordinator + audit trail
 │       ├── services/
-│       │   ├── hosted_agents.py          # Two-mode dispatcher: direct HTTP (docker-compose) or Foundry agent_reference routing (production)
+│       │   ├── hosted_agents.py          # Two-mode dispatcher: direct HTTP (docker-compose) or Foundry agent-specific Responses endpoint (production)
 │       │   ├── audit_pdf.py              # Audit justification PDF (fpdf2)
 │       │   ├── cpt_validation.py         # CPT/HCPCS format validation (pre-flight)
 │       │   └── notification.py           # Notification letters + PDF
@@ -508,22 +563,29 @@ prior-auth-maf/
 │
 ├── agents/
 │   ├── clinical/
-│   │   ├── main.py                       # AzureOpenAIResponsesClient + from_agent_framework
+│   │   ├── main.py                       # azure-ai-agentserver host + responses.parse(text_format=ClinicalResult)
+│   │   ├── mcp_toolbox.py                # Foundry Toolbox MCP client + tool-calling loop
 │   │   ├── schemas.py                    # Pydantic output model (ClinicalResult)
-│   │   ├── requirements.txt              # azure-ai-agentserver, httpx, pydantic
+│   │   ├── requirements.txt              # azure-ai-agentserver, openai, mcp, azure-identity, pydantic
 │   │   ├── Dockerfile
 │   │   ├── agent.yaml                    # Foundry Hosted Agent descriptor
 │   │   └── skills/clinical-review/SKILL.md
-│   ├── coverage/                         # (same pattern — CoverageResult)
-│   ├── compliance/                       # (same pattern — ComplianceResult)
-│   └── synthesis/                        # (same pattern — SynthesisOutput)
+│   ├── coverage/                         # (same pattern + mcp_toolbox.py — CoverageResult)
+│   ├── compliance/                       # (same pattern, no tools — ComplianceResult)
+│   └── synthesis/                        # (same pattern, no tools — SynthesisOutput)
+│
+├── mcp-servers/
+│   └── medical-data/
+│       └── server.py                     # Self-hosted MCP: icd10, clinical_trials, npi, cms_coverage
 │
 ├── frontend/
 │   ├── package.json                      # Next.js + shadcn/ui + Tailwind
 │   └── app/, components/, lib/
 │
 ├── scripts/
-│   └── register_agents.py               # Post-provision: register agents with Foundry Hosted Agents service
+│   ├── register_agents.py               # Post-provision: register agents + create MCP project connections
+│   ├── create_toolbox.py                # Post-provision: create/verify clinical-tools + coverage-tools toolboxes
+│   └── check_agents.py                  # Post-provision: health check
 ├── docs/                                 # Supporting documentation
 ├── infra/                                # Azure Bicep IaC modules
 ├── azure.yaml                            # Azure Developer CLI project

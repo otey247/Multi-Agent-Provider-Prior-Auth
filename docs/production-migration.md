@@ -167,21 +167,25 @@ AZURE_STORAGE_ACCOUNT_URL=https://<account>.blob.core.windows.net
 
 ### Why APIM for MCP?
 
-Currently each agent container calls its 3rd-party MCP servers directly over
-the public internet. In production this creates several operational risks:
+The clinical and coverage agents reach their MCP tools through Foundry
+Toolboxes, which proxy to the self-hosted **medical-data** MCP server (an Azure
+Container App, see `mcp-servers/medical-data/server.py`) and to PubMed. The
+medical-data server wraps several upstream public APIs — NLM Clinical Tables,
+ClinicalTrials.gov, CMS NPPES, and the CMS Coverage API. In production those
+upstream calls and the public ingress on the Container App create operational
+considerations an MCP-aware gateway can centralize:
 
-- **Scattered secrets** — API keys and workaround headers (e.g. `User-Agent: claude-code/1.0`) are duplicated across every agent's Python code and environment variables.
-- **No central rate limiting** — a misbehaving or hallucinating agent can flood a 3rd-party endpoint with unlimited requests.
-- **No fallback** — if a 3rd-party MCP server goes down, every agent fails independently with no circuit-breaker protection.
-- **No audit trail** — MCP tool calls are invisible at the infrastructure level; you only see them in application logs.
-- **Custom HTTP client overhead** — each agent creates a custom `httpx.AsyncClient` solely to inject the `User-Agent` header required by DeepSense CloudFront routing (see `_MCP_HTTP_CLIENT` in any agent `main.py`).
+- **No central rate limiting** — a misbehaving or hallucinating agent can flood an upstream public API (or the medical-data Container App) with unlimited requests.
+- **No fallback** — if an upstream API or the medical-data server is degraded, callers fail with no circuit-breaker protection.
+- **No infrastructure-level audit trail** — MCP tool calls are visible only in application logs, not at the network edge.
+- **Direct public ingress** — the medical-data Container App is exposed over its public FQDN; fronting it lets you restrict ingress and centralize TLS/observability.
 
 Azure API Management's **native MCP Gateway** feature
 ([docs](https://learn.microsoft.com/en-us/azure/api-management/expose-existing-mcp-server))
-solves all of these by acting as a protocol-aware proxy between the MAF
-Hosted Agents and every external MCP endpoint. Because APIM natively speaks
-the MCP protocol (Streamable HTTP and SSE transport), it handles the
-transport lifecycle without custom buffering policies.
+addresses these by acting as a protocol-aware proxy in front of the medical-data
+MCP Container App (and PubMed). Because APIM natively speaks the MCP protocol
+(Streamable HTTP and SSE transport), it handles the transport lifecycle without
+custom buffering policies.
 
 ### Supported APIM Tiers
 
@@ -231,55 +235,63 @@ already-running APIM instance — no provisioning wait time.
 
 ### Architecture
 
+The clinical and coverage agents connect to Foundry Toolboxes, which would
+proxy to APIM instead of directly to the medical-data Container App:
+
 ```
 MAF Hosted Agents (Azure AI Foundry)
-  ├── agent-clinical  ──┐
-  ├── agent-coverage  ──┤
-  ├── agent-compliance──┤──► APIM MCP Gateway (https://<apim>.azure-api.net/)
-  └── agent-synthesis ──┘         │
-                                  │── /icd10-mcp/mcp      → mcp.deepsense.ai/icd10_codes/mcp
-                                  │── /pubmed-mcp/mcp     → pubmed.mcp.claude.com/mcp
-                                  │── /trials-mcp/mcp     → mcp.deepsense.ai/clinical_trials/mcp
-                                  │── /npi-mcp/mcp        → mcp.deepsense.ai/npi_registry/mcp
-                                  └── /cms-mcp/mcp        → mcp.deepsense.ai/cms_coverage/mcp
+  ├── agent-clinical  ──► clinical-tools toolbox ──┐
+  ├── agent-coverage  ──► coverage-tools toolbox ──┤──► APIM MCP Gateway (https://<apim>.azure-api.net/)
+  ├── agent-compliance  (no tools)                 │
+  └── agent-synthesis   (no tools)                 │
+                                  │── /icd10-mcp/mcp   → <medical-data ACA>/icd10/mcp
+                                  │── /pubmed-mcp/mcp  → pubmed.mcp.claude.com/mcp
+                                  │── /trials-mcp/mcp  → <medical-data ACA>/clinical_trials/mcp
+                                  │── /npi-mcp/mcp     → <medical-data ACA>/npi/mcp
+                                  └── /cms-mcp/mcp     → <medical-data ACA>/cms_coverage/mcp
 ```
+
+`<medical-data ACA>` is the medical-data MCP Container App FQDN, surfaced as the
+`MEDICAL_MCP_BASE_URL` Bicep output. Only the toolbox backing URLs in
+`scripts/create_toolbox.py` change to point at APIM; the agents continue to call
+their toolboxes unchanged.
 
 ### What APIM MCP Gateway Adds
 
 | Capability | How |
 |---|---|
 | **Native MCP protocol** | APIM speaks MCP natively — no custom streaming/buffering policies needed |
-| **Centralized header injection** | `User-Agent: claude-code/1.0` and other headers managed via `<set-header>` policy — removed from Python code |
-| **API key storage** | Named Values backed by Key Vault — never in Container App env vars |
+| **Centralized header injection** | Any per-backend headers managed via `<set-header>` policy rather than in server/agent code |
 | **Rate limiting** | `<rate-limit-by-key>` policy per MCP backend, keyed by `Mcp-Session-Id` |
-| **Circuit breaker** | `<retry>` + mock policy fallback if 3rd-party goes down |
-| **Upstream swap** | Change the APIM backend URL without redeploying agents |
+| **Circuit breaker** | `<retry>` + mock policy fallback if the medical-data server or an upstream API goes down |
+| **Upstream swap** | Change the APIM backend URL without re-creating the toolboxes |
 | **Centralised monitoring** | All MCP call volume, latency and failures in one App Insights dashboard |
-| **Network isolation** | Agents call a private APIM endpoint; no direct internet egress needed |
+| **Network isolation** | The medical-data Container App fronts a private APIM endpoint; restrict its public ingress |
 
 ### Step-by-Step Setup
 
 #### 1. Register MCP Backends in APIM
 
-For each external MCP server, create an MCP Server entry in APIM. This can
-be done via the Azure Portal or Bicep:
+For each MCP backend, create an MCP Server entry in APIM. The medical-data
+domains share one Container App FQDN (`MEDICAL_MCP_BASE_URL`); PubMed is a
+separate external endpoint. This can be done via the Azure Portal or Bicep:
 
 **Portal:**
 1. Navigate to your APIM instance → **APIs** → **MCP Servers** → **+ Create MCP server**
 2. Select **Expose an existing MCP server**
-3. Enter the backend MCP server base URL (e.g. `https://mcp.deepsense.ai/icd10_codes/mcp`)
+3. Enter the backend MCP server base URL (e.g. `https://<medical-data-aca-fqdn>/icd10/mcp`)
 4. Set Transport type to **Streamable HTTP**
 5. Enter a Name (e.g. `icd10-codes`) and Base path (e.g. `icd10-mcp`)
 6. Click **Create**
 
-Repeat for each MCP backend (PubMed, ClinicalTrials, NPI Registry, CMS Coverage).
+Repeat for each medical-data domain (ClinicalTrials, NPI, CMS Coverage) plus PubMed.
 
 **Bicep (automated via `azd up`):**
 
 ```bicep
 // infra/modules/apim-mcp.bicep
 
-// MCP Server for ICD-10 codes
+// MCP Server for ICD-10 codes (medical-data Container App domain)
 resource icd10McpServer 'Microsoft.ApiManagement/service/apis@2024-06-01-preview' = {
   parent: apim
   name: 'icd10-mcp'
@@ -288,27 +300,28 @@ resource icd10McpServer 'Microsoft.ApiManagement/service/apis@2024-06-01-preview
     path: 'icd10-mcp'
     protocols: ['https']
     type: 'mcp'
-    serviceUrl: 'https://mcp.deepsense.ai/icd10_codes/mcp'
+    serviceUrl: '${medicalMcpBaseUrl}/icd10/mcp'
   }
 }
 
-// Repeat for pubmed, clinical-trials, npi-registry, cms-coverage
+// Repeat for clinical_trials, npi, cms_coverage (all on the medical-data ACA)
+// and pubmed (https://pubmed.mcp.claude.com/mcp)
 ```
 
-#### 2. Configure Policies (Header Injection)
+#### 2. Configure Policies (Header Injection, Optional)
 
-The external DeepSense MCP servers require a specific `User-Agent` header
-to avoid CloudFront 301 redirects. Apply an inbound policy to inject this
-header centrally:
+The medical-data Container App and PubMed need no special headers. If you place
+the medical-data ACA behind APIM and restrict its public ingress, use an inbound
+`<set-header>` policy for any auth/identity headers your ingress requires:
 
 ```xml
 <policies>
     <inbound>
         <base />
-        <!-- DeepSense CloudFront requires this User-Agent to route MCP traffic -->
-        <set-header name="User-Agent" exists-action="override">
-            <value>claude-code/1.0</value>
-        </set-header>
+        <!-- Example: forward an APIM-managed identity/auth header to the backend -->
+        <!-- <set-header name="X-Backend-Auth" exists-action="override">
+            <value>{{backend-auth-named-value}}</value>
+        </set-header> -->
     </inbound>
     <backend>
         <base />
@@ -321,8 +334,6 @@ header centrally:
     </on-error>
 </policies>
 ```
-
-Apply this policy to each MCP server that routes to DeepSense endpoints.
 
 #### 3. Configure Rate Limiting (Optional but Recommended)
 
@@ -346,57 +357,47 @@ Add per-session rate limiting to prevent runaway agent loops:
 </inbound>
 ```
 
-#### 4. Update Agent Environment Variables
+#### 4. Repoint the Toolbox Backing URLs
 
-In `infra/main.bicep`, update each agent Container App's `MCP_*` env vars
-to point at the APIM MCP Gateway URLs:
-
-```bicep
-// Before (direct internet call):
-{ name: 'MCP_ICD10_CODES', value: 'https://mcp.deepsense.ai/icd10_codes/mcp' }
-
-// After (via APIM MCP Gateway):
-{ name: 'MCP_ICD10_CODES', value: '${apim.outputs.gatewayUrl}/icd10-mcp/mcp' }
-```
-
-#### 5. Simplify Agent Python Code
-
-Once APIM handles the `User-Agent` header injection, remove the custom
-`httpx.AsyncClient` from each agent's `main.py`:
+The clinical and coverage agents always connect to their Foundry Toolbox on the
+project domain — that does not change. What changes is where the toolboxes proxy
+to. The backing MCP URLs are built in `scripts/create_toolbox.py` from
+`MEDICAL_MCP_BASE_URL` (medical-data domains) and `MCP_PUBMED`. Point those at
+APIM and re-run the script to create a new toolbox version:
 
 ```python
-# BEFORE (current — custom HTTP client in every agent):
-_MCP_HTTP_CLIENT = httpx.AsyncClient(
-    headers={"User-Agent": "claude-code/1.0"},
-    timeout=httpx.Timeout(60.0),
-)
-icd10_tool = MCPStreamableHTTPTool(
-    name="icd10-codes",
-    url=os.environ["MCP_ICD10_CODES"],
-    http_client=_MCP_HTTP_CLIENT,
-    load_prompts=False,
-)
-
-# AFTER (with APIM — no custom client needed):
-icd10_tool = MCPStreamableHTTPTool(
-    name="icd10-codes",
-    url=os.environ["MCP_ICD10_CODES"],  # now points to APIM
-    load_prompts=False,
-)
+# scripts/create_toolbox.py — backing URLs now resolve to APIM
+base = os.environ["MEDICAL_MCP_BASE_URL"]   # set to https://<apim>.azure-api.net
+pubmed = os.environ.get("MCP_PUBMED", "https://<apim>.azure-api.net/pubmed-mcp/mcp")
+# _mcp("icd10", f"{base}/icd10-mcp/mcp"), etc.
 ```
 
-### Agent Environment Variable Mapping
+```bash
+# Recreate the toolbox versions against the APIM-fronted backends, then verify:
+python scripts/create_toolbox.py
+python scripts/create_toolbox.py --verify
+```
 
-| Variable | Current value (direct) | APIM MCP Gateway value |
+#### 5. No Agent Code Changes Required
+
+The agents reach tools through the toolbox (`TOOLBOX_ENDPOINT`), so fronting the
+backends with APIM is transparent to the agent containers — no agent image
+rebuild is needed. The medical-data MCP server (`mcp-servers/medical-data/server.py`)
+also stays unchanged; APIM simply sits in front of its public ingress.
+
+### MCP Backend URL Mapping
+
+These are the backing URLs the toolboxes proxy to (configured in
+`scripts/create_toolbox.py`); the agents themselves only ever see the toolbox
+endpoint.
+
+| Toolbox tool | Current backing URL (direct) | APIM MCP Gateway value |
 |---|---|---|
-| `MCP_ICD10_CODES` | `https://mcp.deepsense.ai/icd10_codes/mcp` | `https://<apim>.azure-api.net/icd10-mcp/mcp` |
-| `MCP_PUBMED` | `https://pubmed.mcp.claude.com/mcp` | `https://<apim>.azure-api.net/pubmed-mcp/mcp` |
-| `MCP_CLINICAL_TRIALS` | `https://mcp.deepsense.ai/clinical_trials/mcp` | `https://<apim>.azure-api.net/trials-mcp/mcp` |
-| `MCP_NPI_REGISTRY` | `https://mcp.deepsense.ai/npi_registry/mcp` | `https://<apim>.azure-api.net/npi-mcp/mcp` |
-| `MCP_CMS_COVERAGE` | `https://mcp.deepsense.ai/cms_coverage/mcp` | `https://<apim>.azure-api.net/cms-mcp/mcp` |
-
-The agent code (`MCPStreamableHTTPTool` instantiation in each `main.py`)
-does not change at all — it reads the URL from the environment variable.
+| `icd10` | `${MEDICAL_MCP_BASE_URL}/icd10/mcp` | `https://<apim>.azure-api.net/icd10-mcp/mcp` |
+| `pubmed` | `https://pubmed.mcp.claude.com/mcp` | `https://<apim>.azure-api.net/pubmed-mcp/mcp` |
+| `clinical_trials` | `${MEDICAL_MCP_BASE_URL}/clinical_trials/mcp` | `https://<apim>.azure-api.net/trials-mcp/mcp` |
+| `npi` | `${MEDICAL_MCP_BASE_URL}/npi/mcp` | `https://<apim>.azure-api.net/npi-mcp/mcp` |
+| `cms_coverage` | `${MEDICAL_MCP_BASE_URL}/cms_coverage/mcp` | `https://<apim>.azure-api.net/cms-mcp/mcp` |
 
 ### Diagnostic Logging Caveat
 
@@ -409,9 +410,9 @@ does not change at all — it reads the URL from the environment variable.
 
 ### Limitations (as of March 2026)
 
-- The external MCP server must conform to MCP version `2025-06-18` or later.
-- APIM MCP Gateway supports MCP **tools** and **resources**, but does **not** support MCP **prompts** (which is fine — we set `load_prompts=False` in all agents).
-- APIM does not display tools from the existing MCP server in the portal; tools are registered and managed on the remote server.
+- The backing MCP server must conform to MCP version `2025-06-18` or later. The medical-data server speaks MCP Streamable HTTP (stateless, JSON responses).
+- APIM MCP Gateway supports MCP **tools** and **resources**, but does **not** support MCP **prompts** (which is fine — the medical-data server and PubMed expose only tools).
+- APIM does not display tools from the existing MCP server in the portal; tools are registered and managed on the backing server.
 - MCP server capabilities are not supported in APIM [Workspaces](https://learn.microsoft.com/en-us/azure/api-management/workspaces-overview).
 
 ---

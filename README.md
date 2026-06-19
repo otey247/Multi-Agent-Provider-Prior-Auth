@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 &nbsp;[![Azure](https://img.shields.io/badge/Azure-Deployable-blue?logo=microsoftazure)](https://azure.microsoft.com)
-&nbsp;[![Agent Framework](https://img.shields.io/badge/Microsoft-Agent%20Framework-purple)](https://learn.microsoft.com/agent-framework/)
+&nbsp;[![Foundry Hosted Agents](https://img.shields.io/badge/Microsoft-Foundry%20Hosted%20Agents-purple)](https://learn.microsoft.com/azure/ai-foundry/)
 
-A **provider-side** multi-agent AI solution that helps clinics, hospitals, specialty practices, and revenue cycle teams prepare, validate, and submit prior authorization requests to payers. Four specialized **Foundry Hosted Agents** — Documentation Completeness, Clinical Evidence Retrieval, Policy Matching, and Submission Readiness — assess whether a prior auth package is complete and ready to submit, producing auditable ready-to-submit / needs-review assessments in under 2 minutes. Built with **Microsoft Foundry**, the **Microsoft Agent Framework (MAF)**, **Azure Container Apps**, and **MCP healthcare data servers**.
+A **provider-side** multi-agent AI solution that helps clinics, hospitals, specialty practices, and revenue cycle teams prepare, validate, and submit prior authorization requests to payers. Four specialized **Foundry Hosted Agents** — Documentation Completeness, Clinical Evidence Retrieval, Policy Matching, and Submission Readiness — assess whether a prior auth package is complete and ready to submit, producing auditable ready-to-submit / needs-review assessments in under 2 minutes. Built with **Microsoft Foundry Hosted Agents**, the **Microsoft Agent Framework**, **Azure OpenAI gpt-5.4**, **Azure Container Apps**, and **Foundry Toolboxes** backed by MCP healthcare data servers.
 
 > **Provider-side vs. payer-side:** A payer-side system asks "Should this request be approved or denied?" A **provider-side** system asks "How do we get the right authorization approved as quickly and correctly as possible?" This solution helps providers prepare complete, evidence-backed prior auth packages — it is not a coverage determination engine.
 
@@ -12,7 +12,7 @@ The solution supports **two runtime modes**:
 
 | Mode | How to start | What happens |
 |------|-------------|--------------|
-| **Foundry Hosted Agent** (recommended) | `azd up` | Agents are registered with Microsoft Foundry Hosted Agents; Foundry manages container lifecycle. Backend dispatches through the Foundry project endpoint using `agent_reference` routing and `DefaultAzureCredential`. |
+| **Foundry Hosted Agent** (recommended) | `azd up` | Agents are registered with Microsoft Foundry Hosted Agents; Foundry manages container lifecycle. The backend dispatches to each agent's dedicated Responses endpoint on the Foundry project using `DefaultAzureCredential`. |
 | **Local / Docker Compose** | `docker compose up` | All 4 agent containers + backend + frontend run locally — no Azure deployment needed. |
 
 Decision policy and evaluation methodology adapted from the [Anthropic prior-auth-review-skill](https://github.com/anthropics/healthcare/tree/main/prior-auth-review-skill): submission readiness gate evaluation, per-criterion MET/NOT_MET/INSUFFICIENT status, confidence scoring, progressive gate evaluation, structured audit trails, NCCI bundling risk flagging, service-type classification, and provider specialty-procedure appropriateness as an auditable criterion.
@@ -24,7 +24,7 @@ Decision policy and evaluation methodology adapted from the [Anthropic prior-aut
 </div>
 
 > [!NOTE]
-> With any AI solutions you create using these templates, you are responsible for assessing all associated risks and for complying with all applicable laws and safety standards. Learn more in the transparency documents for [Agent Service](https://learn.microsoft.com/en-us/azure/ai-foundry/responsible-ai/agents/transparency-note) and [Agent Framework](https://github.com/microsoft/agent-framework/blob/main/TRANSPARENCY_FAQ.md).
+> With any AI solutions you create using these templates, you are responsible for assessing all associated risks and for complying with all applicable laws and safety standards. Learn more in the transparency documents for [Microsoft Foundry Agent Service](https://learn.microsoft.com/en-us/azure/ai-foundry/responsible-ai/agents/transparency-note).
 
 ---
 
@@ -35,7 +35,7 @@ Decision policy and evaluation methodology adapted from the [Anthropic prior-aut
 - **Multi-agent parallel execution** — Four specialized agents complete a full prior auth assessment in under 2 minutes; Documentation Completeness and Clinical Evidence Retrieval agents run concurrently via `asyncio.gather`
 - **Foundry Hosted Agents** — Each specialist agent is independently containerized and deployed on Microsoft Foundry; Foundry manages the container lifecycle
 - **Gate-based submission readiness evaluation** — Three sequential gates (Provider Credentials → Code Validation → Payer Policy Requirements) with per-criterion MET/NOT_MET/INSUFFICIENT scoring and confidence weighting
-- **MCP-powered data access** — Five remote MCP healthcare data servers: NPI Registry, ICD-10 Codes, CMS Coverage, Clinical Trials (DeepSense), and PubMed
+- **MCP-powered data access** — Clinical and policy tools are consumed through Foundry Toolboxes (`clinical-tools`, `coverage-tools`) backed by a self-hosted medical-data MCP server (ICD-10, Clinical Trials, NPI Registry, CMS Coverage) and the public PubMed MCP server
 - **Human-in-the-loop** — AI produces draft assessments; staff accept or revise with documented rationale; override traceability flows to audit PDF and provider letters
 - **Evidence-grounded** — Clinical Evidence Retrieval Agent reports only what is documented; never invents clinical facts; identifies missing evidence explicitly
 - **Keyless authentication** — All Azure resource access via `DefaultAzureCredential`; no API keys, passwords, or connection strings stored or rotated
@@ -73,7 +73,7 @@ docker compose up
 
 ### Architecture
 
-This solution uses a **stateless dispatcher** pattern: the FastAPI backend has no local AI runtime — all specialist reasoning runs in four independent Foundry Hosted Agent containers. The orchestrator dispatches through the Foundry project endpoint using `agent_reference` routing and `DefaultAzureCredential`. See [Architecture](./docs/architecture.md) for the full design.
+This solution uses a **stateless dispatcher** pattern: the FastAPI backend has no local AI runtime — all specialist reasoning runs in four independent Foundry Hosted Agent containers. The orchestrator dispatches to each agent's dedicated Responses endpoint on the Foundry project using `DefaultAzureCredential`. See [Architecture](./docs/architecture.md) for the full design.
 
 ### Security
 
@@ -108,7 +108,7 @@ This is an **AI-assisted prior auth preparation tool** — all assessments are d
 <a id="solution-overview"></a>
 ## <img src="./docs/images/readme/solution-overview.svg" width="48" /> Solution overview
 
-This solution leverages **Microsoft Foundry**, the **Microsoft Agent Framework (MAF)**, **Azure Application Insights**, and **MCP healthcare data servers** to create an intelligent provider-side prior authorization preparation pipeline where four specialized AI agents work together to validate documentation, retrieve clinical evidence, match payer requirements, and assess submission readiness — with full audit transparency and native OpenTelemetry tracing. Each specialist agent is independently containerized and deployed as a Foundry Hosted Agent, while the FastAPI orchestrator and Next.js frontend run in Azure Container Apps.
+This solution leverages **Microsoft Foundry Hosted Agents**, **Azure OpenAI gpt-5.4**, **Azure Application Insights**, and **Foundry Toolboxes** backed by MCP healthcare data servers to create an intelligent provider-side prior authorization preparation pipeline where four specialized AI agents work together to validate documentation, retrieve clinical evidence, match payer requirements, and assess submission readiness — with full audit transparency and native OpenTelemetry tracing. Each specialist agent is independently containerized and deployed as a Foundry Hosted Agent, while the FastAPI orchestrator and Next.js frontend run in Azure Container Apps.
 
 ### Solution architecture
 
@@ -137,7 +137,7 @@ The orchestrator coordinates four phases with four specialized agents:
 | Resource | Description |
 |----------|-------------|
 | [Azure OpenAI GPT-5.4 in Microsoft Foundry](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-gpt-5-4-in-microsoft-foundry/4499785) | GPT-5.4 model announcement and capabilities |
-| [Microsoft Agent Framework Documentation](https://learn.microsoft.com/en-us/agent-framework/) | Official MAF documentation and getting started guides |
+| [Microsoft Foundry Hosted Agents Documentation](https://learn.microsoft.com/en-us/azure/ai-foundry/) | Official Microsoft Foundry documentation and getting started guides |
 | [Anthropic Healthcare MCP Marketplace](https://github.com/anthropics/healthcare) | MCP healthcare data tools (MCP data tools, not the AI model) |
 | [Prior Auth Review Skill](https://github.com/anthropics/healthcare/tree/main/prior-auth-review-skill) | Original methodology reference for evaluation criteria and confidence scoring |
 | [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) | MCP specification and tooling |
@@ -168,12 +168,14 @@ The orchestrator coordinates four phases with four specialized agents:
   <summary><b>Foundry Hosted Agent architecture</b></summary>
 
   - Each of the 4 specialist agents has its own `main.py`, `schemas.py`, `Dockerfile`, `agent.yaml`, and `skills/` directory under `agents/<name>/`
-  - Agents use the native MAF `from_agent_framework` pattern with `default_options={"response_format": PydanticModel}` for token-level structured output — no JSON fence parsing
+  - Every agent runs as a Foundry Hosted Agent on the `azure-ai-agentserver` Responses protocol host (`azure-ai-agentserver-core` + `azure-ai-agentserver-responses`). The two tool-using agents (Clinical Evidence Retrieval, Policy Matching) drive the model with the OpenAI SDK via `client.responses.parse(text_format=PydanticModel)` against the Foundry Responses API at `{AZURE_AI_PROJECT_ENDPOINT}/openai/v1`; the two pure-LLM agents (Documentation Completeness, Submission Readiness) use the Microsoft Agent Framework (`AzureOpenAIResponsesClient` with `default_options={"response_format": PydanticModel}`). Both paths enforce token-level structured output — no JSON fence parsing
+  - Each agent's behavior is defined by its `skills/<name>/SKILL.md`, loaded into the system prompt at startup (the tool-using agents inline it directly; the Microsoft Agent Framework agents load it via `SkillsProvider`)
   - The FastAPI backend is a **pure HTTP dispatcher** — it has no local AI runtime; all specialist reasoning runs in the four independent agent containers
-  - Each agent container exposes `POST /responses` (Foundry Responses API protocol) and is independently versioned, deployable, and scalable
-  - `hosted_agents.py` is a **two-mode dispatcher**: direct HTTP to agent containers (Docker Compose), or `agent_reference` routing through `{AZURE_AI_PROJECT_ENDPOINT}/responses` with `DefaultAzureCredential` (Foundry Hosted Agents)
-  - Agents are registered with Foundry via `scripts/register_agents.py` (postprovision hook in `azure.yaml`) — Foundry manages the ACA container lifecycle; no self-managed ACA modules in Bicep
-  - `scripts/check_agents.py` runs automatically after registration to verify all agents, App Insights, MCP connections, backend, and frontend are healthy before the deployment completes
+  - Each agent container exposes `POST /responses` (Foundry Responses API protocol, version `1.0.0`) and is independently versioned, deployable, and scalable
+  - `hosted_agents.py` is a **two-mode dispatcher**: direct HTTP to agent containers (Docker Compose), or each agent's dedicated Responses endpoint `{AZURE_AI_PROJECT_ENDPOINT}/agents/{name}/endpoint/protocols/openai/responses` with `DefaultAzureCredential` (Foundry Hosted Agents)
+  - Resilience: if tools or the model call fail, an agent returns a schema-valid degraded result (HTTP 200, conservative manual-review payload) instead of erroring
+  - Agents are registered with Foundry via `scripts/register_agents.py` (postprovision hook in `azure.yaml`), which creates an immutable version and routes 100% endpoint traffic to it — Foundry manages the ACA container lifecycle; no self-managed ACA modules in Bicep
+  - `scripts/check_agents.py` runs automatically after registration to verify all agents, App Insights, toolboxes, backend, and frontend are healthy before the deployment completes
 </details>
 
 <details>
@@ -181,7 +183,7 @@ The orchestrator coordinates four phases with four specialized agents:
 
   - Agent behaviors defined in SKILL.md files — domain experts can update payer policy rules without code changes
   - SKILL.md files live alongside each agent container under `agents/<name>/skills/<skill-name>/SKILL.md`
-  - Loaded at agent startup via MAF `SkillsProvider` — no backend code changes needed to update clinical rules
+  - Loaded into each agent's system prompt at startup — no backend code changes needed to update clinical rules
   - Documentation Completeness skill: 10-item checklist (NCCI bundling + service type classification added as items 9 and 10)
   - Policy Matching skill: Provider Specialty-Procedure Appropriateness is a required explicit criterion (Step 1.4)
   - Clinical Evidence Retrieval skill: low-confidence extraction banner when `extraction_confidence < 60%` surfaces directly in the frontend Clinical tab
@@ -191,12 +193,12 @@ The orchestrator coordinates four phases with four specialized agents:
 <details>
   <summary><b>MCP-powered data access</b></summary>
 
-  - Five remote MCP servers: NPI Registry, ICD-10 Codes, CMS Coverage, Clinical Trials (DeepSense), PubMed (Anthropic Healthcare MCP)
-  - Each agent container calls MCP servers directly via `MCPStreamableHTTPTool` (configured via `MCP_*` env vars)
-  - DeepSense servers use Key-based auth with `User-Agent: claude-code/1.0` header (handled by a shared `httpx.AsyncClient` in each agent container); PubMed uses unauthenticated access
-  - PubMed uses `_ReconnectingMCPTool` to auto-reconnect on idle session expiry (~10 min TTL)
-  - All agents use `AzureOpenAIResponsesClient` with gpt-5.4 on Microsoft Foundry
-  - MCP tools visible in Foundry portal under **Build → Tools**
+  - The Clinical Evidence Retrieval and Policy Matching agents consume MCP tools through **Foundry Toolboxes** — two project-scoped managed MCP endpoints named `clinical-tools` (icd10, pubmed, clinical_trials) and `coverage-tools` (npi, cms_coverage)
+  - A Foundry Toolbox is a managed MCP endpoint on the Foundry project domain (`{project_endpoint}/toolboxes/{name}/mcp?api-version=v1`); the agent connects to it as an MCP client (streamable-HTTP) using its managed-identity bearer token plus the `Foundry-Features: Toolboxes=V1Preview` header, and the toolbox proxies tool calls out to the backing MCP servers from Foundry's own network
+  - Tools are exposed to the model as `{server_label}___{tool_name}` (for example `icd10___validate_code`)
+  - Backing MCP servers: a self-hosted **medical-data** MCP server (Streamable HTTP, stateless, public read-only reference data, no secrets) running as an Azure Container App that wraps free official public APIs — ICD-10 (NLM Clinical Tables), Clinical Trials (ClinicalTrials.gov v2), NPI (CMS NPPES Registry), and CMS Coverage (api.coverage.cms.gov); plus the public PubMed MCP server at `https://pubmed.mcp.claude.com/mcp` (unauthenticated)
+  - Both tool-using agents run gpt-5.4 via the OpenAI SDK `responses.parse`, driving a tool-calling loop over the toolbox tools to a structured result
+  - Toolboxes are created and verified by `scripts/create_toolbox.py` and visible in the Foundry portal under **Build → Tools**
 </details>
 
 <details>

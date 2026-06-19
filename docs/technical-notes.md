@@ -11,47 +11,104 @@ Frontend (Next.js / ACA)
         └── FastAPI Backend / Orchestrator (ACA)
               │
               ├─── [Docker Compose — local dev] ──────────────────────────────────────
-              │    POST http://agent-{name}/responses   (HOSTED_AGENT_*_URL)
+              │    POST {HOSTED_AGENT_*_URL}/responses
               │    → Clinical / Compliance / Coverage / Synthesis Container
               │
               └─── [Foundry Hosted Agents — production (azd up)] ──────────────────
-                   POST {AZURE_AI_PROJECT_ENDPOINT}/responses
-                   with  agent_reference: {name, type: "agent_reference"}
-                         Authorization: Bearer <DefaultAzureCredential>
+                   POST {AZURE_AI_PROJECT_ENDPOINT}
+                          /agents/{name}/endpoint/protocols/openai/responses
+                          ?api-version=v1
+                   with  Authorization: Bearer <DefaultAzureCredential>
+                         Foundry-Features: HostedAgents=V1Preview
                    → Foundry Agent Service → registered agent containers
 ```
 
-Each agent container runs **Microsoft Agent Framework (MAF)** via
-`azure.ai.agentserver.agentframework.from_agent_framework`, exposes an HTTP
-endpoint, and is registered with **Microsoft Foundry** as a Hosted Agent via
-`scripts/register_agents.py`.
+Each agent container is a **Foundry Hosted Agent** built on the
+`azure-ai-agentserver` **Responses protocol host**
+(`azure-ai-agentserver-core` + `azure-ai-agentserver-responses`). A
+`ResponsesAgentServerHost` exposes the HTTP endpoint and dispatches to a single
+`@app.response_handler`. Agents are registered with **Microsoft Foundry** via
+`scripts/register_agents.py`. The hosted-agent Responses protocol version is
+`1.0.0`; the model is `gpt-5.4`.
+
+The two MCP-backed agents (clinical, coverage) drive the model directly with
+the **OpenAI SDK** against `{AZURE_AI_PROJECT_ENDPOINT}/openai/v1`, using the
+agent's managed identity (`DefaultAzureCredential`, scope
+`https://ai.azure.com/.default`) as the bearer token. Structured output is
+enforced with `client.responses.parse(text_format=<PydanticModel>)`. The two
+tool-free agents (compliance, synthesis) run on **Microsoft Agent Framework**
+(`AzureOpenAIResponsesClient(...).as_agent(...)`) with the same project
+endpoint and managed identity, enforcing structure via
+`default_options={"response_format": <PydanticModel>}`.
 
 ---
 
-## MCP Tool Connections
+## MCP Tool Connections (Foundry Toolbox)
 
-Each agent's `main.py` creates `MCPStreamableHTTPTool` instances with a shared
-`httpx.AsyncClient` (including `User-Agent: claude-code/1.0` for DeepSense
-CloudFront routing). Tools are passed via `tools=[...]` to `.as_agent()` and
-called directly during inference.
+`clinical-reviewer-agent` and `coverage-assessment-agent` consume MCP tools
+through a **Foundry Toolbox** — a managed MCP endpoint *on the project domain*
+that proxies tool calls out to the backing MCP servers from Foundry's own
+network. The agent connects to the toolbox as an MCP **streamable-HTTP client**
+(the toolbox endpoint cannot be passed to the Responses API as a `type: mcp`
+`server_url`; it must be consumed by an MCP client).
 
-> **Note:** `scripts/register_agents.py` creates Foundry project connections
-> for portal visibility (**Build → Tools**), but `MCPTool` definitions on
-> `HostedAgentDefinition` are disabled (`tools=[]`) because the Foundry
-> `tools/resolve` API is not GA in all regions.
+Toolbox endpoint shape (one per agent):
 
-### PubMed Session Reconnect
+```
+{AZURE_AI_PROJECT_ENDPOINT}/toolboxes/{clinical-tools|coverage-tools}/mcp?api-version=v1
+```
 
-PubMed's MCP server terminates idle sessions after ~10 minutes. The clinical
-agent uses `_ReconnectingMCPTool` — a subclass of `MCPStreamableHTTPTool` that
-catches `McpError('Session terminated')` and auto-reconnects with a fresh
-session. Other MCP servers (DeepSense) use standard `MCPStreamableHTTPTool`.
+Every toolbox request carries the managed-identity bearer token plus the header
+`Foundry-Features: Toolboxes=V1Preview`.
+
+Per request, the agent's handler (`mcp_toolbox.run_with_toolbox`) opens the MCP
+`ClientSession` inside an `AsyncExitStack` — created and closed in the same
+handler coroutine, which structurally avoids the cross-task anyio teardown that
+a module-level MCP client would hit. It then lists the toolbox tools, maps them
+to Responses function tools, and drives a `responses.parse` tool-calling loop to
+a final structured result. The loop continues each turn with
+`previous_response_id` (server-stored state) rather than re-sending the
+conversation — this keeps the reasoning items intact across turns, which gpt-5.4
+requires. If the tool budget (`max_iters=8`) is exhausted, the agent forces a
+final structured answer with no tools.
+
+Tools are exposed to the model as `{server_label}___{tool_name}`
+(e.g. `icd10___validate_code`). The two toolboxes mirror the per-agent split:
+
+| Toolbox          | server_label tools                    |
+|------------------|---------------------------------------|
+| `clinical-tools` | `icd10`, `pubmed`, `clinical_trials`  |
+| `coverage-tools` | `npi`, `cms_coverage`                 |
+
+Backing MCP servers:
+
+- A self-hosted **medical-data** MCP server (Azure Container App; Streamable
+  HTTP; stateless; public read-only data) serves `icd10`, `clinical_trials`,
+  `npi`, and `cms_coverage`. Its base URL is injected as `MEDICAL_MCP_BASE_URL`.
+- **PubMed** (`https://pubmed.mcp.claude.com/mcp`, unauthenticated).
+
+The toolboxes are created/verified by `scripts/create_toolbox.py`; all tools
+are registered with `require_approval="never"` because the medical-data calls
+are read-only (search/validate/lookup). `scripts/register_agents.py` also
+registers the same five MCP servers as Foundry project connections (visible in
+the portal under **Build → Tools**) and injects each agent's `TOOLBOX_ENDPOINT`.
+
+`compliance-agent` and `synthesis-agent` use **no tools** — they reason purely
+over the request data and the upstream agent outputs.
 
 ---
 
 ## Agent Skills
 
-Each agent loads its SKILL.md via `SkillsProvider`:
+The MCP-backed agents (clinical, coverage) read their `skills/<name>/SKILL.md`
+from disk at startup and inline the body into the system prompt:
+
+```python
+system_prompt = _BASE_INSTRUCTIONS + "\n\n# Skill: clinical-review\n\n" + _load_skill()
+```
+
+The tool-free agents (compliance, synthesis) load their skill via
+`SkillsProvider`, passed to `.as_agent(context_providers=[skills_provider])`:
 
 ```python
 skills_provider = SkillsProvider(
@@ -73,33 +130,40 @@ agents/
 
 ## Structured Output
 
-Each agent container declares a local Pydantic model in `schemas.py` and
-passes it via MAF's `default_options` parameter:
+Each agent container declares a local Pydantic model in `schemas.py`.
+
+The MCP-backed agents (clinical, coverage) enforce it with the OpenAI SDK's
+`responses.parse(text_format=...)`. The structured JSON is read back from
+`output_parsed` (falling back to `output_text`):
 
 ```python
-agent = (
-    AzureOpenAIResponsesClient(...)
-    .as_agent(
-        name="clinical-reviewer-agent",
-        id="clinical-reviewer-agent",  # Must match registered name for Foundry Traces
-        tools=[...],
-        default_options={"response_format": ClinicalResult},
-    )
+# agents/clinical/main.py + mcp_toolbox.py
+resp = await client.responses.parse(
+    model=deployment,
+    instructions=system_prompt,
+    input=[{"role": "user", "content": input_text}],
+    text_format=ClinicalResult,
+    tools=tool_specs,          # toolbox tools, when discovered
 )
-app = from_agent_framework(agent)
-_patch_trace_agent_id(app, "clinical-reviewer-agent")  # Fix gen_ai.agent.id for Foundry Traces
-app.run()
+output_text = resp.output_parsed.model_dump_json()
 ```
 
-MAF enforces the schema as a token-level JSON constraint at inference time —
-no post-processing or regex extraction needed. The backend dispatcher reads
-the text payload from the OpenAI SDK response:
+The tool-free agents (compliance, synthesis) enforce it through Microsoft Agent
+Framework's `default_options`:
 
 ```python
-# hosted_agents.py
-output_text = response.output_text
-return json.loads(output_text)
+agent = AzureOpenAIResponsesClient(...).as_agent(
+    name="synthesis-agent",
+    id="synthesis-agent",   # matches the registered agent name
+    tools=[],
+    context_providers=[skills_provider],
+    default_options={"response_format": SynthesisOutput},
+)
 ```
+
+In both cases the schema is a token-level JSON constraint at inference time —
+no post-processing or regex extraction is needed. The backend dispatcher reads
+the text payload out of the Foundry Responses reply and `json.loads()` it.
 
 The Pydantic models live in each agent container:
 
@@ -189,74 +253,31 @@ portal's built-in Traces view when App Insights is linked to the Foundry project
 | Process | `OTEL_SERVICE_NAME` | What it instruments |
 |---------|---------------------|---------------------|
 | FastAPI backend | `prior-auth-backend` | HTTP requests/responses, outgoing httpx calls to agents, logs, exceptions, live metrics |
-| Clinical agent | `agent-clinical` | MAF `invoke_agent`, `chat`, `execute_tool` spans, token metrics |
+| Clinical agent | `agent-clinical` | Responses model calls, MCP toolbox tool calls, token metrics |
 | Coverage agent | `agent-coverage` | Same as above |
-| Compliance agent | `agent-compliance` | Same as above |
+| Compliance agent | `agent-compliance` | Responses model calls, token metrics |
 | Synthesis agent | `agent-synthesis` | Same as above |
 
 Each process configures observability differently based on its role:
 
 - **Backend** (`observability.py`): Calls `configure_azure_monitor()` directly
-  before the FastAPI app starts. This is the standard Azure Monitor SDK pattern
-  for non-MAF applications.
+  before the FastAPI app starts. This is the standard Azure Monitor SDK pattern.
 - **Agent containers**: Do NOT call `configure_azure_monitor()` manually.
-  Instead, the Foundry agentserver adapter's `init_tracing()` method (called
-  internally by `from_agent_framework(agent).run()`) handles the full OTel
-  setup — creating exporters, calling `configure_otel_providers()`, and
-  enabling MAF instrumentation. Agent code only sets env vars before the
-  adapter runs.
-
-> **Why agents don't call `configure_azure_monitor()` directly:** The adapter's
-> `init_tracing()` calls `configure_otel_providers()` which **replaces** any
-> existing OTel providers. If agent code calls `configure_azure_monitor()` first,
-> the adapter overwrites it — creating a conflict where traces go to App Insights
-> but the Foundry portal can't correlate them (Trace ID = "--", Duration = "--").
-> Letting the adapter handle everything avoids this conflict.
-
-### Agent ID / Name for Trace Correlation
-
-> **TODO (vNext):** The `_patch_trace_agent_id()` monkey-patch in each agent's
-> `main.py` is a workaround for the current Hosted Agents Preview. It should be
-> removed when migrating to the vNext hosted agents backend, which handles
-> telemetry at the platform level via Entra-based agent identity.
-
-The agentserver adapter (v1.0.0b17) has two gaps that prevent Foundry
-trace correlation for hosted agents:
-
-1. **Missing `gen_ai.agent.id` on spans.** The adapter reads this from the
-   request payload's `agent` field (via `AgentRunContext.get_agent_id_object()`),
-   but Foundry Agent Service does not include the `agent` reference when
-   forwarding requests to hosted containers.
-
-2. **Missing Foundry env var dimensions on spans.** The adapter populates
-   `azure.ai.agentserver.agent_id`, `agent_name`, and `agent_project_resource_id`
-   on log records (via `CustomDimensionsFilter`/`get_dimensions()`), but NOT
-   on OTel spans (requests/dependencies tables).
-
-**Fix:** All four agent containers monkey-patch
-`AgentRunContextMiddleware.set_run_context_to_context_var` (via
-`_patch_trace_agent_id()` in each `main.py`) to inject both `gen_ai.agent.id`
-and the Foundry env var dimensions into the span context.
-
-**Current status:** The patch correctly populates all attributes in App Insights
-spans. However, the Foundry Traces tab still shows "--" because it reads
-from a Foundry internal OTEL collector pipeline that does not surface hosted
-agent data in the current Preview version. The Monitor tab (App Insights)
-works correctly.
+  Instead, the `azure-ai-agentserver` Responses host wires up OTel tracing
+  internally when `ResponsesAgentServerHost().run()` starts, driven entirely by
+  the environment variables the agent sets beforehand
+  (`APPLICATIONINSIGHTS_CONNECTION_STRING` and `OTEL_SERVICE_NAME`). Agent code
+  only sets those env vars; it does not configure exporters itself.
 
 ### Content Recording (Sensitive Data)
 
-The adapter's `configure_otel_providers()` hard-codes `enable_sensitive_data=True`,
-which records full LLM prompts, tool arguments, and results in telemetry spans.
-This cannot currently be overridden via environment variable — the MAF env var
-`ENABLE_SENSITIVE_DATA` is ignored because the adapter passes the value explicitly.
+The Responses host records full LLM prompts, tool arguments, and results in
+telemetry spans by default.
 
-> **⚠️ Production consideration:** With `enable_sensitive_data=True`, PA request
-> content (patient names, DOBs, diagnoses, clinical notes) will be stored in
-> Application Insights telemetry. Ensure your App Insights resource has
-> appropriate access controls and data retention policies. If this is a concern,
-> contact the `azure-ai-agentserver` team about making this configurable, or
-> reduce App Insights data retention to the minimum required period.
+> **⚠️ Production consideration:** This stores PA request content (patient names,
+> DOBs, diagnoses, clinical notes) in Application Insights telemetry. Ensure your
+> App Insights resource has appropriate access controls and data retention
+> policies, or reduce App Insights data retention to the minimum required period.
 
 ### Application Map
 
@@ -294,17 +315,13 @@ prior_auth_review (request_id)
   └── phase_4_audit
 ```
 
-### MAF Spans (agent layer — all four containers)
+### Agent-layer spans
 
-| Span | Emitted by | Key attributes |
-|------|-----------|----------------|
-| `invoke_agent` | MAF | agent name, status |
-| `chat` | MAF | model deployment, turn index |
-| `execute_tool` | MAF | tool name, tool result status |
-
-These spans are children of the backend `*_agent_dispatch` dependency spans,
-creating an end-to-end trace from HTTP request → backend orchestration → agent
-tool calls.
+The agent containers emit OTel spans for their Responses model calls and (for
+clinical/coverage) their MCP toolbox tool calls, with token metrics. These spans
+are children of the backend `*_agent_dispatch` dependency spans, creating an
+end-to-end trace from HTTP request → backend orchestration → agent model/tool
+calls.
 
 ### Custom Backend Span Attributes
 
@@ -325,19 +342,22 @@ automatically from the shared `monitoring` module output):
 APPLICATION_INSIGHTS_CONNECTION_STRING=InstrumentationKey=<key>;IngestionEndpoint=...
 ```
 
-**Important: Dual env var names for agent containers.** The Foundry agentserver
-adapter reads a different env var name than the Azure Monitor SDK:
+**Important: env var names for agent containers.** The `azure-ai-agentserver`
+Responses host reads a different connection-string env var than the Azure
+Monitor SDK, and the Foundry platform reserves the `APPLICATION*INSIGHTS` names
+in the registration payload. `register_agents.py` therefore passes the
+connection string to hosted agents as `MONITORING_CONNECTION_STRING`, and each
+agent's `main.py` bridges it at startup:
 
 | Package | Env var name | Convention |
 |---------|-------------|------------|
 | `azure-monitor-opentelemetry` (backend) | `APPLICATION_INSIGHTS_CONNECTION_STRING` | Azure Monitor SDK |
-| `azure-ai-agentserver` (Foundry adapter) | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Azure App Service |
+| `azure-ai-agentserver` (agent host) | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Azure App Service |
 
-Agent code bridges this by calling `os.environ.setdefault("APPLICATIONINSIGHTS_CONNECTION_STRING", ...)`
-when `APPLICATION_INSIGHTS_CONNECTION_STRING` is set. Both env vars are also
-passed to agent containers via `register_agents.py`. Without the adapter-expected
-name, the adapter's `init_tracing()` skips setup entirely and the Foundry portal
-shows empty Trace ID / Duration / Tokens and "0/3 monitoring features enabled."
+Agent code bridges this by reading `APPLICATION_INSIGHTS_CONNECTION_STRING` or
+`MONITORING_CONNECTION_STRING` and calling
+`os.environ.setdefault("APPLICATIONINSIGHTS_CONNECTION_STRING", ...)`. Without
+the host-expected name, the Responses host skips tracing setup.
 
 Locally (docker-compose), the variable is intentionally absent — all
 observability blocks are no-ops so the app runs without App Insights.
@@ -348,8 +368,10 @@ observability blocks are no-ops so the app runs without App Insights.
 
 `hosted_agents.py` automatically selects the dispatch mode based on environment:
 
-- **URL set** (`HOSTED_AGENT_*_URL`): direct HTTP to the container — Docker Compose mode
-- **URL empty + `AZURE_AI_PROJECT_ENDPOINT` set**: Foundry `agent_reference` routing — production mode
+- **URL set** (`HOSTED_AGENT_*_URL`): direct HTTP `POST {url}/responses` to the container — Docker Compose mode
+- **URL empty + `AZURE_AI_PROJECT_ENDPOINT` set**: `POST {project_endpoint}/agents/{name}/endpoint/protocols/openai/responses?api-version=v1` with `Foundry-Features: HostedAgents=V1Preview` — production mode
+
+The request body carries the payload as the user message (`{"input": <json>, "stream": false}`); no `agent_reference`, `model`, or `agent` field is sent.
 
 **Docker Compose mode** — `HOSTED_AGENT_*_URL` vars (defaults already in `docker-compose.yml`):
 
@@ -372,13 +394,13 @@ Shared: `HOSTED_AGENT_TIMEOUT_SECONDS` (default `180`).
 | `HOSTED_AGENT_COVERAGE_NAME` | `coverage-assessment-agent` |
 | `HOSTED_AGENT_SYNTHESIS_NAME` | `synthesis-agent` |
 
-Token acquisition uses `azure.identity.aio.DefaultAzureCredential` — no manual token configuration needed.
+The backend acquires its bearer token with `DefaultAzureCredential` (the sync credential run off-thread via `asyncio.to_thread`, scope `https://ai.azure.com/.default`) — no manual token configuration needed.
 
 The following RBAC roles are automatically assigned during `azd up`:
 
 | **Role** | **Principal** | **Scope** | **How Assigned** | **Purpose** |
 |----------|---------------|-----------|------------------|-------------|
-| Cognitive Services OpenAI User | Backend Container App managed identity | Foundry account | `role-assignments.bicep` (provision) | Orchestrator calls Foundry Responses API with `agent_reference` routing |
+| Cognitive Services OpenAI User | Backend Container App managed identity | Foundry account | `role-assignments.bicep` (provision) | Orchestrator calls the hosted-agent Responses endpoints |
 | AcrPull | Foundry project managed identity | Container Registry | `role-assignments.bicep` (provision) | Foundry Agent Service pulls agent container images from ACR |
 | Cognitive Services OpenAI Contributor | Foundry project managed identity | Foundry account | `role-assignments.bicep` (provision) | Hosted agent containers call gpt-5.4 via the Responses API |
 | Azure AI User | Foundry project managed identity | Foundry account | `role-assignments.bicep` (provision) | Hosted agent containers use Foundry Agent Service data actions |
@@ -396,9 +418,18 @@ The first four roles are assigned by `infra/modules/role-assignments.bicep` duri
 After `azd provision`, `scripts/register_agents.py` (called from the `azure.yaml` postprovision hook)
 registers all four agents with Foundry:
 
-1. Calls `azure-ai-projects` SDK `client.agents.create_version()` with the ACR container image
-   and resource specs from `agent.yaml`
-2. Calls `az cognitiveservices agent start` to start each agent under Foundry management
+1. Creates the five Foundry MCP tool connections (idempotent PUT via the ARM REST
+   API) so they appear in the portal under **Build → Tools**.
+2. Calls the `azure-ai-projects` SDK `client.agents.create_version()` with the ACR
+   container image, the `responses@1.0.0` protocol record, per-agent
+   `environment_variables` (including each agent's `TOOLBOX_ENDPOINT`), and CPU/memory.
+3. Routes 100% of endpoint traffic to the new version via
+   `client.beta.agents.patch_agent_details()` (data-plane SDK, no CLI extension
+   required). Auto-start via `az cognitiveservices agent start` is a best-effort
+   fallback — scale-to-zero agents also cold-start on the first request.
+
+The two toolboxes (`clinical-tools`, `coverage-tools`) are created/verified
+separately by `scripts/create_toolbox.py`.
 
 Resource specs (defined in each `agents/<name>/agent.yaml`):
 

@@ -1,10 +1,10 @@
 # Medical-data MCP server
 
-Self-hosted MCP **Streamable HTTP** server that replaces the retired DeepSense
-MCP servers (`mcp.deepsense.ai`, now NXDOMAIN — see
-[docs/troubleshooting.md](../../docs/troubleshooting.md)). It wraps official,
-free, no-auth public health APIs so the prior-auth agents no longer depend on a
-third-party hosted endpoint that can disappear.
+Self-hosted MCP **Streamable HTTP** server that exposes ICD-10, clinical-trials,
+NPI, and CMS-coverage tools over per-domain MCP endpoints. It is a thin, stateless
+wrapper over official, free, no-auth public health APIs, so the prior-auth
+clinical and coverage agents get authoritative reference data without depending on
+any third-party hosted MCP endpoint.
 
 | Path (server name) | Tools | Upstream API |
 |------|-------|--------------|
@@ -13,14 +13,28 @@ third-party hosted endpoint that can disappear.
 | `/npi/mcp` (npi-registry) | `npi_validate`, `npi_lookup`, `npi_search` | [CMS NPPES NPI Registry](https://npiregistry.cms.hhs.gov) |
 | `/cms_coverage/mcp` (cms-coverage) | `search_national_coverage`, `search_local_coverage`, `get_coverage_document`, `get_contractors` | [CMS Coverage API](https://api.coverage.cms.gov/docs/swagger/index.html) (NCD/LCD/Article — real determinations) |
 
-PubMed (`pubmed.mcp.claude.com`) was unaffected by the outage and stays as-is.
+Each domain is mounted on its own path, and the server also serves `GET /health`
+(and `/readiness`) returning `200 {"status": "ok", "domains": [...]}`. The tool
+**names and signatures match exactly what the agent `SKILL.md` files call**, so the
+clinical and coverage agents work unchanged. Transport is **stateless + JSON
+responses** (no session to expire).
 
-The tool **names and signatures match exactly what the agent `SKILL.md` files
-call** (the same contract the DeepSense servers exposed), so the clinical and
-coverage agents work unchanged. The per-domain path layout also mirrors
-DeepSense, so the agents need **only their `MCP_*` URLs repointed** here.
-Transport is **stateless + JSON** (no session to expire), which is exactly what
-agent_framework's `MCPStreamableHTTPTool` speaks.
+## How the agents consume it
+
+The clinical-reviewer and coverage-assessment Foundry Hosted Agents do **not** call
+this server directly. They connect to **Foundry Toolboxes** (`clinical-tools`,
+`coverage-tools`) — managed MCP endpoints on the Foundry project domain — as MCP
+clients (bearer token + `Foundry-Features: Toolboxes=V1Preview`). The toolbox
+proxies tool calls out to this medical-data server (and to PubMed at
+`https://pubmed.mcp.claude.com/mcp`) from Foundry's own network. The toolboxes are
+created by [`scripts/create_toolbox.py`](../../scripts/create_toolbox.py):
+
+- `clinical-tools` → `icd10`, `pubmed`, `clinical_trials`
+- `coverage-tools` → `npi`, `cms_coverage`
+
+So this server only needs to be reachable by Foundry — it runs as a public-ingress
+Azure Container App, and its FQDN is published as the `MEDICAL_MCP_BASE_URL` bicep
+output.
 
 ## Run & test locally
 
@@ -50,9 +64,11 @@ This is wired into the standard deploy. On `azd up` / `azd provision`:
    `MEDICAL_MCP_BASE_URL` + `MCP_CONTAINER_APP_NAME`.
 2. The `azure.yaml` postprovision hook builds the image
    (`az acr build ./mcp-servers/medical-data`) and points the app at it.
-3. `scripts/register_agents.py` reads `MEDICAL_MCP_BASE_URL` and registers the
-   clinical/coverage agents with `https://<fqdn>/<domain>/mcp` URLs.
-4. `scripts/check_agents.py --runtime` verifies the agents end-to-end.
+3. `scripts/create_toolbox.py` creates the `clinical-tools` / `coverage-tools`
+   Foundry Toolboxes pointing at `https://<fqdn>/<domain>/mcp` (and PubMed).
+4. `scripts/register_agents.py` registers the clinical/coverage agents against
+   their toolbox endpoints, and `scripts/check_agents.py --runtime` verifies the
+   agents end-to-end.
 
 ### Redeploy just this server
 
@@ -82,10 +98,14 @@ python mcp-servers/medical-data/test_client.py "$(azd env get-value MEDICAL_MCP_
   returns both.
 - **`billable` for ICD-10** is approximated as "exact match with no more-specific
   child code" (leaf node) from the NLM dataset.
-- **Public ingress.** The Container App has external ingress so Foundry-hosted
-  agents can reach it. It exposes only read-only public-government data and no
-  secrets — the same posture as the DeepSense servers it replaces. Add
-  authentication if you tighten that posture.
+- **Transport & host check.** The server speaks MCP Streamable HTTP, stateless
+  with JSON responses. The default DNS-rebinding host check is disabled because
+  the server is behind Azure Container Apps TLS ingress and serves only public,
+  read-only data; Foundry reaches it via the container FQDN.
+- **Public ingress, no secrets.** The Container App has external ingress so the
+  Foundry Toolboxes can reach it. It exposes only read-only public-government
+  reference data, stores nothing, and holds no secrets — no authentication is
+  required. Add authentication if you tighten that posture.
 - **Resilience.** If this server is ever unreachable, the clinical/coverage
-  agents now degrade to a valid HTTP 200 manual-review result instead of HTTP 500
-  (startup reachability probe + handler fallback in each agent's `main.py`).
+  agents degrade to a valid HTTP 200 manual-review result instead of HTTP 500
+  (startup reachability handling + handler fallback in each agent's `main.py`).

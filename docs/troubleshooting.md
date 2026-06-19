@@ -32,65 +32,71 @@ The backend logs show an auth error when trying to invoke a hosted agent.
 `coverage-assessment-agent` failing with `HTTP 500 ... (empty response body)`
 while `compliance-agent` and `synthesis-agent` pass.
 
-**Cause:** The two failing agents are the only ones with MCP tools. Their MCP
-servers were hosted on `mcp.deepsense.ai`, which was retired and now returns
-**NXDOMAIN** (verify: `nslookup mcp.deepsense.ai 8.8.8.8`). The MCP
-connect/list-tools phase runs inside `agent.run()` and was not covered by the
-`_SafeMCPTool.call_tool()` wrappers, so the dead-host connection error
-propagated uncaught and the agentserver returned a 500.
+**Cause:** The clinical and coverage agents are the only two that use tools. They
+reach their MCP tools through a Foundry Toolbox on the project domain
+(`{project_endpoint}/toolboxes/{clinical-tools|coverage-tools}/mcp?api-version=v1`),
+and the toolbox proxies out to the self-hosted **medical-data** MCP server (an
+Azure Container App). A 500 on these two agents means the toolbox could not be
+reached or the toolbox could not proxy through to the backing server — typically
+the medical-data Container App is unhealthy, the `MEDICAL_MCP_BASE_URL` output is
+unset, or the toolbox version was never created.
 
-**Fix (applied):**
+**Fix — work through the chain from the backing server outward:**
 
-1. **Replacement MCP server** — `mcp-servers/medical-data` self-hosts ICD-10,
-   clinical-trials, NPI and CMS-coverage tools over public APIs. It is built and
-   wired by `azd up`; `scripts/register_agents.py` repoints the agents via the
-   `MEDICAL_MCP_BASE_URL` output. See
-   [mcp-servers/medical-data/README.md](../mcp-servers/medical-data/README.md).
-2. **Resilience** — each agent's `main.py` now probes MCP host reachability at
-   startup (drops dead tools) and wraps the run handler so any MCP outage
-   degrades to a valid HTTP 200 manual-review result instead of a 500.
+1. **Verify the medical-data MCP Container App is healthy.** Confirm the output
+   is set and the `/health` endpoint responds:
+   ```bash
+   azd env get-value MEDICAL_MCP_BASE_URL
+   curl "$(azd env get-value MEDICAL_MCP_BASE_URL)/health"
+   ```
+   A healthy server returns `200 {"status": "ok", "domains": ["clinical_trials", "cms_coverage", "icd10", "npi"]}`.
 
-If you still see 500s: confirm `MEDICAL_MCP_BASE_URL` is set
-(`azd env get-value MEDICAL_MCP_BASE_URL`) and the agent images were rebuilt
-after the fix (check the image tag in `az cognitiveservices agent show`).
+2. **Verify the toolboxes exist and proxy through.** This lists each toolbox's
+   tools and calls one through to the backing server:
+   ```bash
+   python scripts/create_toolbox.py --verify
+   ```
+   `[OK] clinical-tools: N tools; icd10___validate_code -> ...` confirms the full
+   path (agent → toolbox → medical-data Container App) works. If a toolbox is
+   missing or empty, recreate it:
+   ```bash
+   python scripts/create_toolbox.py
+   ```
 
----
+3. **Smoke-test the agents end to end:**
+   ```bash
+   python scripts/check_agents.py --runtime
+   ```
 
-## PubMed MCP: "Session terminated" / search_articles Fails
-
-PubMed literature search fails with `search_articles: PubMed search failed` but
-other MCP tools (ICD-10, Clinical Trials, NPI, CMS) work fine.
-
-**Cause:** PubMed's MCP server (`pubmed.mcp.claude.com`) terminates idle sessions
-after ~10 minutes. The agent container reuses the same MCP session across requests.
-If the session has been idle too long between user submissions, PubMed responds
-with `McpError("Session terminated")`.
-
-**Fix (already applied):** The clinical agent uses `_ReconnectingMCPTool` — a
-subclass of `MCPStreamableHTTPTool` that catches `Session terminated` errors
-and automatically reconnects with a fresh session. See `agents/clinical/main.py`.
-
-If you still see this error, check:
-1. The container image was rebuilt after the fix (`azd up`)
-2. The agent version includes the `_ReconnectingMCPTool` change (check image tag in
-   `az cognitiveservices agent show`)
+If you still see 500s after the toolbox verifies clean, confirm the agent images
+were rebuilt and the endpoint routes traffic to the latest version (check the
+image tag and version in `az cognitiveservices agent show`).
 
 ---
 
-## Agent Returns "ID cannot be null or empty" / status: "failed"
+## PubMed literature search returns no results
 
-All agent calls fail with `400 - ID cannot be null or empty` or return
-`status: "failed"` with empty output.
+Clinical literature search returns empty `literature_support` while other tools
+(ICD-10, clinical trials, NPI, CMS coverage) work fine.
 
-**Cause:** `MCPTool` definitions in `HostedAgentDefinition.tools` cause the
-`agentserver-core` adapter to inject a `UserInfoContextMiddleware` that calls
-`/agents/{name}/tools/resolve`. This API is not available in all Foundry regions
-(returns 404), which crashes the entire ASGI pipeline.
+**Cause:** PubMed is the one tool served by an external MCP endpoint
+(`https://pubmed.mcp.claude.com/mcp`, unauthenticated) rather than the self-hosted
+medical-data Container App. It is wired into the `clinical-tools` toolbox alongside
+the ICD-10 and clinical-trials tools. A PubMed-only failure points at that single
+upstream, not the medical-data server.
 
-**Fix:** Ensure agents are registered with `tools=[]` in `scripts/register_agents.py`.
-MCP tools are handled directly by `MCPStreamableHTTPTool` in each agent's `main.py`,
-not via Foundry's `MCPTool` proxy. See the comments in `scripts/register_agents.py`
-for details.
+**Fix:**
+
+1. Confirm `clinical-tools` lists a `pubmed___*` tool and proxies through:
+   ```bash
+   python scripts/create_toolbox.py --verify
+   ```
+2. Confirm `MCP_PUBMED` (default `https://pubmed.mcp.claude.com/mcp`) is the value
+   the `clinical-tools` toolbox points at — the toolbox tool URLs are built from
+   `MEDICAL_MCP_BASE_URL` and `MCP_PUBMED` in `scripts/create_toolbox.py`.
+
+A transient PubMed upstream outage degrades only literature support; the rest of
+the clinical result is unaffected.
 
 ---
 
@@ -240,8 +246,8 @@ fails.
 The backend uses `response.output_text` from the OpenAI SDK and parses the JSON result directly.
 
 **Fix:** Confirm the agent container is returning the standard Foundry Responses
-API envelope. MAF's `from_agent_framework(agent).run()` produces this format
-automatically.
+API envelope. The `azure-ai-agentserver` Responses protocol host produces this
+format automatically for every agent.
 
 ---
 
