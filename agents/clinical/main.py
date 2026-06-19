@@ -120,14 +120,28 @@ def _degraded_clinical_result(detail: str) -> str:
     )
 
 
-def _result_to_text(resp) -> str:
-    """Extract the structured JSON from an openai Responses parse result."""
+def _result_to_text(resp, tool_audit: list[dict] | None = None) -> str:
+    """Extract the structured JSON from an openai Responses parse result.
+
+    When ``tool_audit`` is provided (the MCP tool calls actually executed this
+    run), it overrides the model's self-reported ``tool_results`` so the audit
+    trail reflects real executions rather than what the model chose to report.
+    """
     parsed = getattr(resp, "output_parsed", None)
+    data: dict | None = None
     if parsed is not None:
-        return parsed.model_dump_json()
-    text = getattr(resp, "output_text", None)
-    if text:
-        return text
+        data = parsed.model_dump()
+    else:
+        text = getattr(resp, "output_text", None)
+        if text:
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                return text
+    if isinstance(data, dict):
+        if tool_audit:
+            data["tool_results"] = tool_audit
+        return json.dumps(data)
     return str(resp)
 
 
@@ -176,7 +190,7 @@ def main() -> None:
             # timeout: a stalled toolbox/model call raises (caught below) and
             # degrades to HTTP 200 instead of letting the gateway emit a 500.
             async with AsyncOpenAI(base_url=base_url, api_key=token, timeout=120.0) as client:
-                resp = await run_with_toolbox(
+                resp, tool_audit = await run_with_toolbox(
                     client=client,
                     toolbox_url=toolbox_url,
                     token=token,
@@ -185,7 +199,7 @@ def main() -> None:
                     input_text=input_text,
                     text_format=ClinicalResult,
                 )
-            output_text = _result_to_text(resp)
+            output_text = _result_to_text(resp, tool_audit)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:  # noqa: BLE001 — never 500 to Foundry

@@ -108,7 +108,14 @@ async def run_with_toolbox(
     If ``toolbox_url`` is empty the model runs with no tools (still structured).
     Raises on failure — the caller is expected to wrap this and degrade to a
     schema-valid HTTP 200 fallback so the hosted runtime never sees a 500.
+
+    Returns ``(response, tool_audit)`` where ``tool_audit`` is the authoritative
+    record of MCP tool calls actually executed in this run — one
+    ``{"tool_name", "status": "pass"|"fail", "detail"}`` entry per call. The
+    caller injects this into the structured result's ``tool_results`` so the
+    audit reflects real executions, not the model's self-report.
     """
+    tool_audit: list[dict] = []
     async with AsyncExitStack() as stack:
         tool_specs: list[dict] = []
         session: ClientSession | None = None
@@ -134,7 +141,7 @@ async def run_with_toolbox(
         for _ in range(max_iters):
             calls = [o for o in resp.output if getattr(o, "type", None) == "function_call"]
             if not calls or session is None:
-                return resp
+                return resp, tool_audit
 
             tool_outputs: list[dict] = []
             for call in calls:
@@ -145,9 +152,23 @@ async def run_with_toolbox(
                 try:
                     result = await session.call_tool(call.name, args)
                     output = _tool_result_text(result)
+                    is_error = bool(getattr(result, "isError", False)) or output.lstrip().startswith('{"error"')
                 except Exception as exc:  # noqa: BLE001 — surface tool error to model
                     logger.warning("Toolbox tool %s failed: %s", call.name, exc)
                     output = json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+                    is_error = True
+                # Authoritative audit of the call we actually executed.
+                tool_audit.append(
+                    {
+                        "tool_name": call.name,
+                        "status": "fail" if is_error else "pass",
+                        "detail": (
+                            f"{call.name} failed: {output[:300]}"
+                            if is_error
+                            else f"{call.name} executed successfully."
+                        ),
+                    }
+                )
                 tool_outputs.append(
                     {
                         "type": "function_call_output",
@@ -166,7 +187,7 @@ async def run_with_toolbox(
 
         # Tool budget exhausted — force a final structured answer without tools.
         logger.warning("Toolbox loop hit max_iters=%s; forcing final answer", max_iters)
-        return await client.responses.parse(
+        final = await client.responses.parse(
             model=model,
             input=[
                 {
@@ -180,3 +201,4 @@ async def run_with_toolbox(
             previous_response_id=resp.id,
             text_format=text_format,
         )
+        return final, tool_audit
