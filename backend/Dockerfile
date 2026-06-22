@@ -1,7 +1,11 @@
 # =============================================================================
 # Backend: Python + Claude Agent SDK (CLI bundled in platform wheel)
 # =============================================================================
-FROM python:3.12-slim
+# Base image pulled from the ECR Public mirror of Docker Official Images to avoid
+# Docker Hub's anonymous pull rate limit ("toomanyrequests") on the ACR build
+# agent. Override with --build-arg BASE_REGISTRY=docker.io/library for Docker Hub.
+ARG BASE_REGISTRY=public.ecr.aws/docker/library
+FROM ${BASE_REGISTRY}/python:3.12-slim
 
 # Install curl for health check
 RUN apt-get update && \

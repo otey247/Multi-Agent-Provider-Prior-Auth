@@ -6,7 +6,11 @@
 # Build for Foundry/ACA (Linux AMD64):
 #   az acr build --registry <acr> --image mcp-medical-data:<tag> \
 #       --platform linux/amd64 ./mcp-servers/medical-data
-FROM python:3.12-slim
+# Base image pulled from the ECR Public mirror of Docker Official Images to avoid
+# Docker Hub's anonymous pull rate limit ("toomanyrequests") on the ACR build
+# agent. Override with --build-arg BASE_REGISTRY=docker.io/library for Docker Hub.
+ARG BASE_REGISTRY=public.ecr.aws/docker/library
+FROM ${BASE_REGISTRY}/python:3.12-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \

@@ -2,8 +2,14 @@
 # Frontend: Build Next.js app, serve with Nginx
 # =============================================================================
 
+# Base images are pulled from the ECR Public mirror of Docker Official Images to
+# avoid Docker Hub's anonymous pull rate limit ("toomanyrequests") on the ACR
+# build agent. Override with --build-arg BASE_REGISTRY=docker.io/library to pull
+# from Docker Hub instead.
+ARG BASE_REGISTRY=public.ecr.aws/docker/library
+
 # Stage 1 — Build
-FROM node:20-slim AS builder
+FROM ${BASE_REGISTRY}/node:20-slim AS builder
 
 WORKDIR /app
 
@@ -16,7 +22,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2 — Serve
-FROM nginx:alpine
+FROM ${BASE_REGISTRY}/nginx:alpine
 
 # Remove default nginx config
 RUN rm /etc/nginx/conf.d/default.conf
