@@ -134,6 +134,11 @@ module backend './modules/container-app.bicep' = {
       { name: 'HOSTED_AGENT_SYNTHESIS_NAME', value: 'synthesis-agent' }
       { name: 'HOSTED_AGENT_TIMEOUT_SECONDS', value: '180' }
       { name: 'APPLICATION_INSIGHTS_CONNECTION_STRING', value: monitoring.outputs.appInsightsConnectionString }
+      // Debug Console — Foundry-native observability (App Insights KQL + deep-links).
+      { name: 'APPLICATION_INSIGHTS_RESOURCE_ID', value: monitoring.outputs.appInsightsResourceId }
+      { name: 'AZURE_SUBSCRIPTION_ID', value: subscription().subscriptionId }
+      { name: 'AZURE_RESOURCE_GROUP', value: rg.name }
+      { name: 'AZURE_AI_PROJECT_ID', value: aiFoundry.outputs.projectId }
       { name: 'FRONTEND_ORIGIN', value: 'https://${abbrs.appContainerApps}frontend-${resourceToken}.${containerAppsEnv.outputs.defaultDomain}' }
     ]
     secrets: []
@@ -153,6 +158,7 @@ module roleAssignments './modules/role-assignments.bicep' = {
     backendPrincipalId: backend.outputs.principalId
     containerRegistryName: containerRegistry.outputs.name
     foundryProjectPrincipalId: aiFoundry.outputs.projectPrincipalId
+    appInsightsName: monitoring.outputs.appInsightsName
   }
 }
 // ── Frontend Container App ──────────────────────────────────────────────────

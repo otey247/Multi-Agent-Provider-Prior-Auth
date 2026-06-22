@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/tabs";
 import { ConfidenceBar } from "@/components/confidence-bar";
 import { AgentDetails } from "@/components/agent-details";
-import { ExecutionTrace } from "@/components/execution-trace";
+import { DebugConsole } from "@/components/debug-console";
 import { DecisionPanel } from "@/components/decision-panel";
 import {
   CheckCircle2,
@@ -104,7 +104,7 @@ export function ReviewDashboard({ review: rawReview, liveTrace }: ReviewDashboar
           </TabsTrigger>
           <TabsTrigger value="trace" className="flex items-center gap-1.5">
             <Activity className="h-3.5 w-3.5" />
-            Execution Trace
+            Debug Console
           </TabsTrigger>
         </TabsList>
 
@@ -407,7 +407,7 @@ export function ReviewDashboard({ review: rawReview, liveTrace }: ReviewDashboar
         </TabsContent>
 
         <TabsContent value="trace">
-          <ExecutionTrace trace={trace} />
+          <DebugConsole trace={trace} />
         </TabsContent>
       </Tabs>
     </div>

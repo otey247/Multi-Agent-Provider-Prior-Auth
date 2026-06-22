@@ -27,6 +27,9 @@ param containerRegistryName string
 @description('Principal ID of the Foundry project system-assigned managed identity')
 param foundryProjectPrincipalId string
 
+@description('Name of the Application Insights component (for backend Monitoring Reader grant)')
+param appInsightsName string = ''
+
 // Cognitive Services OpenAI User — allows calling Azure OpenAI + Foundry APIs
 var cognitiveServicesOpenAIUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
 
@@ -39,12 +42,19 @@ var azureAIUserRoleId = '53ca6127-db72-4b80-b1b0-d745d6d5456d'
 // AcrPull — allows pulling container images from Azure Container Registry
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 
+// Monitoring Reader — lets the backend query App Insights OTel spans (Debug Console)
+var monitoringReaderRoleId = '43d0d8ad-25c7-4714-9337-8ba259a9fe05'
+
 resource foundryAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
   name: foundryAccountName
 }
 
 resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' existing = {
   name: containerRegistryName
+}
+
+resource appInsights 'Microsoft.Insights/components@2020-02-02' existing = if (!empty(appInsightsName)) {
+  name: appInsightsName
 }
 
 // 1. Backend → CognitiveServicesOpenAIUser on Foundry account
@@ -89,6 +99,18 @@ resource foundryProjectAIUserRoleAssignment 'Microsoft.Authorization/roleAssignm
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', azureAIUserRoleId)
     principalId: foundryProjectPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// 5. Backend → Monitoring Reader on Application Insights
+//    Lets the Debug Console query the run's OpenTelemetry spans (KQL via resource id).
+resource backendMonitoringReaderRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(appInsightsName)) {
+  name: guid(appInsights.id, backendPrincipalId, monitoringReaderRoleId)
+  scope: appInsights
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', monitoringReaderRoleId)
+    principalId: backendPrincipalId
     principalType: 'ServicePrincipal'
   }
 }

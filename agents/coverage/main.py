@@ -139,7 +139,7 @@ def _degraded_coverage_result(detail: str) -> str:
     )
 
 
-def _result_to_text(resp, tool_audit: list[dict] | None = None) -> str:
+def _result_to_text(resp, tool_audit: list[dict] | None = None, model_calls: list[dict] | None = None) -> str:
     """Extract the structured JSON from an openai Responses parse result.
 
     When ``tool_audit`` is provided (the MCP tool calls actually executed this
@@ -160,8 +160,23 @@ def _result_to_text(resp, tool_audit: list[dict] | None = None) -> str:
     if isinstance(data, dict):
         if tool_audit:
             data["tool_results"] = tool_audit
+        if model_calls:
+            data["model_calls"] = model_calls
         return json.dumps(data)
     return str(resp)
+
+
+def _phi_values(input_text: str) -> list[str]:
+    """Extract PHI values from the request payload to mask from trace payloads."""
+    try:
+        data = json.loads(input_text)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    req = data.get("request", data)
+    keys = ("patient_name", "patient_dob", "insurance_id", "ordering_provider_name")
+    return [str(req[k]) for k in keys if isinstance(req, dict) and req.get(k)]
 
 
 async def _extract_input_text(request: CreateResponse, context: ResponseContext) -> str:
@@ -209,7 +224,7 @@ def main() -> None:
             # timeout: a stalled toolbox/model call raises (caught below) and
             # degrades to HTTP 200 instead of letting the gateway emit a 500.
             async with AsyncOpenAI(base_url=base_url, api_key=token, timeout=120.0) as client:
-                resp, tool_audit = await run_with_toolbox(
+                resp, tool_audit, model_calls = await run_with_toolbox(
                     client=client,
                     toolbox_url=toolbox_url,
                     token=token,
@@ -217,8 +232,9 @@ def main() -> None:
                     instructions=system_prompt,
                     input_text=input_text,
                     text_format=CoverageResult,
+                    phi_values=_phi_values(input_text),
                 )
-            output_text = _result_to_text(resp, tool_audit)
+            output_text = _result_to_text(resp, tool_audit, model_calls)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:  # noqa: BLE001 — never 500 to Foundry

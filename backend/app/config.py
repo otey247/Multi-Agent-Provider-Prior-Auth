@@ -48,6 +48,12 @@ class Settings:
     APPLICATION_INSIGHTS_CONNECTION_STRING: str = os.getenv(
         "APPLICATION_INSIGHTS_CONNECTION_STRING", ""
     )
+    # Debug Console — Foundry-native observability (logstream + App Insights KQL +
+    # deep-links). All optional; endpoints degrade gracefully when unset.
+    APPLICATION_INSIGHTS_RESOURCE_ID: str = os.getenv("APPLICATION_INSIGHTS_RESOURCE_ID", "")
+    AZURE_SUBSCRIPTION_ID: str = os.getenv("AZURE_SUBSCRIPTION_ID", "")
+    AZURE_RESOURCE_GROUP: str = os.getenv("AZURE_RESOURCE_GROUP", "")
+    AZURE_AI_PROJECT_ID: str = os.getenv("AZURE_AI_PROJECT_ID", "")  # ARM id for portal deep-link
 
     @property
     def foundry_project_endpoint(self) -> str:

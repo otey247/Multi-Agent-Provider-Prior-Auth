@@ -35,6 +35,8 @@ from contextlib import AsyncExitStack
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from redact import redact
+
 logger = logging.getLogger(__name__)
 
 # Required on every Toolbox MCP request during the V1 preview.
@@ -98,6 +100,7 @@ async def run_with_toolbox(
     instructions: str,
     input_text: str,
     text_format,
+    phi_values: list[str] | None = None,
     max_iters: int = 8,
 ):
     """Run a structured-output agent turn backed by Foundry Toolbox tools.
@@ -110,15 +113,45 @@ async def run_with_toolbox(
     Raises on failure — the caller is expected to wrap this and degrade to a
     schema-valid HTTP 200 fallback so the hosted runtime never sees a 500.
 
-    Returns ``(response, tool_audit)`` where ``tool_audit`` is the authoritative
-    record of MCP tool calls actually executed in this run — one
-    ``{"tool_name", "status": "pass"|"fail", "detail"}`` entry per call. The
-    caller injects this into the structured result's ``tool_results`` so the
-    audit reflects real executions, not the model's self-report.
+    Returns ``(response, tool_audit, model_calls)``:
+      * ``tool_audit`` — authoritative per-tool record (status, timing, and
+        PHI-redacted ``args_full``/``result_full`` + short summaries), injected
+        into the structured result's ``tool_results``.
+      * ``model_calls`` — one ``{"kind":"llm", model, duration_ms,
+        started_offset_ms, input_tokens, output_tokens}`` entry per
+        ``responses.parse`` round, for the Debug Console timeline/events.
+    ``phi_values`` are request values (patient name/DOB/insurance) masked from
+    captured payloads alongside generic PHI patterns.
     """
     tool_audit: list[dict] = []
+    model_calls: list[dict] = []
     run_start = time.monotonic()
-    async with AsyncExitStack() as stack:
+
+    async def _parse(**kwargs):
+        """responses.parse wrapper that records a timed llm span + token usage."""
+        _t0 = time.monotonic()
+        _off = int((_t0 - run_start) * 1000)
+        r = await client.responses.parse(**kwargs)
+        usage = getattr(r, "usage", None)
+        model_calls.append({
+            "kind": "llm",
+            "model": kwargs.get("model", model),
+            "order": len(model_calls),
+            "duration_ms": int((time.monotonic() - _t0) * 1000),
+            "started_offset_ms": _off,
+            "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        })
+        return r
+
+    # Manage the MCP session explicitly: a newer mcp client can raise an anyio
+    # cancel-scope BaseExceptionGroup on session *teardown*; capturing the result
+    # first and closing in a suppressing finally keeps a successful run from being
+    # discarded by a teardown-only error (which would otherwise degrade to 200).
+    final_resp = None
+    stack = AsyncExitStack()
+    await stack.__aenter__()
+    try:
         tool_specs: list[dict] = []
         session: ClientSession | None = None
         if toolbox_url:
@@ -133,7 +166,7 @@ async def run_with_toolbox(
         if tool_specs:
             parse_kwargs["tools"] = tool_specs
 
-        resp = await client.responses.parse(
+        resp = await _parse(
             model=model,
             instructions=instructions,
             input=[{"role": "user", "content": input_text}],
@@ -143,7 +176,8 @@ async def run_with_toolbox(
         for _ in range(max_iters):
             calls = [o for o in resp.output if getattr(o, "type", None) == "function_call"]
             if not calls or session is None:
-                return resp, tool_audit
+                final_resp = resp
+                break
 
             tool_outputs: list[dict] = []
             for call in calls:
@@ -164,8 +198,11 @@ async def run_with_toolbox(
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 # server_label___tool_name -> ("server_label", "tool_name")
                 label, _sep, short = (call.name or "").partition("___")
+                # Redact PHI before any payload enters the trace.
+                args_red = redact(json.dumps(args) if args else "", phi_values)
+                out_red = redact(output, phi_values)
                 # Authoritative, timed audit of the call we actually executed —
-                # surfaced in the in-app Execution Trace + tool_results.
+                # surfaced in the in-app Debug Console + tool_results.
                 tool_audit.append(
                     {
                         "tool_name": call.name,
@@ -175,10 +212,12 @@ async def run_with_toolbox(
                         "status": "fail" if is_error else "pass",
                         "duration_ms": duration_ms,
                         "started_offset_ms": started_offset_ms,
-                        "args_summary": (json.dumps(args) if args else "")[:300],
-                        "result_summary": output[:500],
+                        "args_summary": args_red[:300],
+                        "result_summary": out_red[:500],
+                        "args_full": args_red[:4000],
+                        "result_full": out_red[:8000],
                         "detail": (
-                            f"{call.name} failed: {output[:300]}"
+                            f"{call.name} failed: {out_red[:300]}"
                             if is_error
                             else f"{call.name} executed successfully."
                         ),
@@ -193,27 +232,35 @@ async def run_with_toolbox(
                 )
 
             # Reasoning-safe continuation: server keeps prior turn + reasoning.
-            resp = await client.responses.parse(
+            resp = await _parse(
                 model=model,
                 input=tool_outputs,
                 previous_response_id=resp.id,
                 **parse_kwargs,
             )
 
-        # Tool budget exhausted — force a final structured answer without tools.
-        logger.warning("Toolbox loop hit max_iters=%s; forcing final answer", max_iters)
-        final = await client.responses.parse(
-            model=model,
-            input=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Stop calling tools. Return your final structured result "
-                        "now using the information gathered so far."
-                    ),
-                }
-            ],
-            previous_response_id=resp.id,
-            text_format=text_format,
-        )
-        return final, tool_audit
+        else:
+            # Tool budget exhausted — force a final structured answer without tools.
+            logger.warning("Toolbox loop hit max_iters=%s; forcing final answer", max_iters)
+            final_resp = await _parse(
+                model=model,
+                input=[
+                    {
+                        "role": "user",
+                        "content": (
+                            "Stop calling tools. Return your final structured result "
+                            "now using the information gathered so far."
+                        ),
+                    }
+                ],
+                previous_response_id=resp.id,
+                text_format=text_format,
+            )
+    finally:
+        # Close the per-request MCP session. Suppress teardown-only errors
+        # (anyio cancel-scope BaseExceptionGroup) — the result is already captured.
+        try:
+            await stack.aclose()
+        except BaseException as exc:  # noqa: BLE001
+            logger.warning("Toolbox session teardown raised (ignored): %s", type(exc).__name__)
+    return final_resp, tool_audit, model_calls

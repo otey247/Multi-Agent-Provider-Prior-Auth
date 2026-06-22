@@ -5,6 +5,9 @@ import type {
   DecisionResponse,
   ProgressEvent,
   ExecutionTrace,
+  LogFrame,
+  RunSpansResponse,
+  ObsLinks,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
@@ -136,6 +139,127 @@ export async function submitDecision(
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
     throw new Error(error.detail || `Decision failed (${response.status})`);
+  }
+
+  return response.json();
+}
+
+// --- Observability helpers ---
+
+/**
+ * Stream a Foundry agent's session logs via SSE.
+ * Frames: `event: log` with a {stream, message, timestamp} (or preamble) payload,
+ * and `event: error` with a {detail} payload. Mirrors the SSE-reader approach
+ * used by `submitReviewStream`. Returns nothing; pass `signal` to cancel.
+ */
+export async function streamSessionLogs(
+  agentName: string,
+  sessionId: string,
+  {
+    onLog,
+    onError,
+    signal,
+  }: {
+    onLog: (frame: LogFrame) => void;
+    onError?: (error: string) => void;
+    signal?: AbortSignal;
+  }
+): Promise<void> {
+  try {
+    const response = await fetch(
+      `${API_BASE}/observability/logs/${encodeURIComponent(agentName)}/${encodeURIComponent(sessionId)}`,
+      { signal }
+    );
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      onError?.(err.detail || `Log stream failed (${response.status})`);
+      return;
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      onError?.("No log stream available");
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    // eventType must persist across chunks — see submitReviewStream for rationale.
+    let eventType = "log";
+
+    const processLines = (lines: string[]) => {
+      for (const line of lines) {
+        if (line.startsWith("event: ")) {
+          eventType = line.slice(7).trim();
+        } else if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          try {
+            const parsed = JSON.parse(data);
+            if (eventType === "error") {
+              onError?.(parsed.detail || "Unknown error");
+            } else {
+              onLog(parsed as LogFrame);
+            }
+          } catch (parseErr) {
+            console.error("[SSE logs] Failed to parse JSON:", parseErr, "data:", data.slice(0, 200));
+          }
+          eventType = "log"; // Reset after processing a data line
+        }
+        // Skip comment lines (": keepalive") and empty lines
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      processLines(lines);
+    }
+
+    // Process any remaining data left in the buffer after the stream ends
+    if (buffer.trim()) {
+      processLines(buffer.split("\n"));
+    }
+  } catch (err) {
+    if ((err as Error).name !== "AbortError") {
+      onError?.(err instanceof Error ? err.message : "An error occurred");
+    }
+  }
+}
+
+/**
+ * Fetch App Insights spans for a correlation id (a TraceAgent.response_id).
+ */
+export async function fetchRunSpans(
+  correlationId: string
+): Promise<RunSpansResponse> {
+  const response = await fetch(
+    `${API_BASE}/observability/traces/${encodeURIComponent(correlationId)}`
+  );
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `Spans fetch failed (${response.status})`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Fetch observability deep-links for a correlation id (execution_trace.request_id).
+ */
+export async function fetchObsLinks(correlationId: string): Promise<ObsLinks> {
+  const response = await fetch(
+    `${API_BASE}/observability/links/${encodeURIComponent(correlationId)}`
+  );
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `Links fetch failed (${response.status})`);
   }
 
   return response.json();
