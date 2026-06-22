@@ -10,6 +10,8 @@ mcp>=1.9.0
 python-multipart>=0.0.9
 fpdf2>=2.8.0
 azure-monitor-opentelemetry>=1.6.0
+# Debug Console: query App Insights OTel spans for a run (KQL via resource id)
+azure-monitor-query>=1.4.0
 azure-identity>=1.16.0
 azure-ai-projects>=2.0.0
 openai>=1.0.0

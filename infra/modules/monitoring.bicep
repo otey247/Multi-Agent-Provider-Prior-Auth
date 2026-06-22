@@ -31,3 +31,4 @@ output logAnalyticsWorkspaceId string = logAnalyticsWorkspace.id
 output appInsightsConnectionString string = appInsights.properties.ConnectionString
 output appInsightsInstrumentationKey string = appInsights.properties.InstrumentationKey
 output appInsightsResourceId string = appInsights.id
+output appInsightsName string = appInsights.name

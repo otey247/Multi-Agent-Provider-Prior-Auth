@@ -941,6 +941,62 @@ def _generate_audit_justification(
     return "\n".join(lines)
 
 
+def _build_trace_events(phases: list[dict], request_data: dict) -> list[dict]:
+    """Flatten the trace into an ordered, navigable event list for the Debug
+    Console's ADK-style Event inspector (user_input → llm/tool steps → final).
+    Cross-agent offsets are per-agent-relative, so events keep phase→agent→step
+    insertion order rather than a global time sort. No PHI: the user_input event
+    shows only non-PHI request fields; tool payloads are already redacted."""
+    events: list[dict] = []
+    eid = 0
+    req_summary = {
+        "diagnosis_codes": request_data.get("diagnosis_codes", []),
+        "procedure_codes": request_data.get("procedure_codes", []),
+        "provider_npi": request_data.get("provider_npi", ""),
+        "payer_name": request_data.get("payer_name", ""),
+    }
+    events.append({
+        "id": eid, "type": "user_input", "phase": "", "agent": "",
+        "label": "User request", "status": "done", "duration_ms": 0,
+        "started_offset_ms": 0, "request": json.dumps(req_summary, indent=2),
+        "response": "",
+    })
+    eid += 1
+    for ph in phases:
+        for ag in ph.get("agents", []):
+            for st in ag.get("steps", []):
+                if st.get("kind") == "llm":
+                    events.append({
+                        "id": eid, "type": "llm_call", "phase": ph.get("name", ""),
+                        "agent": ag.get("name", ""),
+                        "label": f"{ag.get('name', '')} · model.call ({st.get('model', '')})",
+                        "status": st.get("status", "done"),
+                        "duration_ms": st.get("duration_ms", 0),
+                        "started_offset_ms": st.get("started_offset_ms", 0),
+                        "request": f"input_tokens: {st.get('input_tokens', 0)}",
+                        "response": f"output_tokens: {st.get('output_tokens', 0)}",
+                    })
+                else:
+                    events.append({
+                        "id": eid, "type": "tool_call", "phase": ph.get("name", ""),
+                        "agent": ag.get("name", ""),
+                        "label": f"{ag.get('name', '')} · {st.get('name', '')}",
+                        "status": st.get("status", "pass"),
+                        "duration_ms": st.get("duration_ms", 0),
+                        "started_offset_ms": st.get("started_offset_ms", 0),
+                        "request": st.get("args_full", ""),
+                        "response": st.get("result_full", ""),
+                    })
+                eid += 1
+    events.append({
+        "id": eid, "type": "final", "phase": "phase_4", "agent": "synthesis",
+        "label": "Final recommendation", "status": "done", "duration_ms": 0,
+        "started_offset_ms": phases[-1].get("started_offset_ms", 0) if phases else 0,
+        "request": "", "response": "",
+    })
+    return events
+
+
 async def run_multi_agent_review(
     request_data: dict,
     on_progress: Callable[[dict], Awaitable[None]] | None = None,
@@ -1015,11 +1071,38 @@ async def _run_review_pipeline(
                 "started_offset_ms": int(tr.get("started_offset_ms", 0) or 0),
                 "args_summary": str(tr.get("args_summary", "")),
                 "result_summary": str(tr.get("result_summary", "")),
+                "args_full": str(tr.get("args_full", "") or tr.get("args_summary", "")),
+                "result_full": str(tr.get("result_full", "") or tr.get("result_summary", "")),
             })
         calls.sort(key=lambda c: c["order"])
+
+        # Unified ordered steps: model calls + tool calls interleaved by offset.
+        steps: list[dict] = []
+        for m in (result.get("model_calls") or []):
+            if not isinstance(m, dict):
+                continue
+            steps.append({
+                "kind": "llm", "name": "model.call", "status": "done",
+                "model": str(m.get("model", "") or model or model_name),
+                "duration_ms": int(m.get("duration_ms", 0) or 0),
+                "started_offset_ms": int(m.get("started_offset_ms", 0) or 0),
+                "input_tokens": int(m.get("input_tokens", 0) or 0),
+                "output_tokens": int(m.get("output_tokens", 0) or 0),
+            })
+        for c in calls:
+            steps.append({
+                "kind": "tool", "name": c["tool"], "status": c["status"],
+                "server_label": c["server_label"], "duration_ms": c["duration_ms"],
+                "started_offset_ms": c["started_offset_ms"],
+                "args_full": c["args_full"], "result_full": c["result_full"],
+            })
+        steps.sort(key=lambda s: s.get("started_offset_ms", 0))
+
         return {
             "name": name, "status": status, "duration_ms": duration_ms,
-            "model": model or model_name, "tool_calls": calls,
+            "model": model or model_name, "tool_calls": calls, "steps": steps,
+            "response_id": str(result.get("_foundry_response_id", "") or ""),
+            "session_id": str(result.get("_foundry_session_id", "") or ""),
         }
 
     async def _emit(event: dict) -> None:
@@ -1328,6 +1411,7 @@ async def _run_review_pipeline(
         "request_id": request_id, "started_at": start_time,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "total_duration_ms": _off(), "phases": trace_phases,
+        "events": _build_trace_events(trace_phases, request_data),
     }
 
     # --- Assemble final response ---

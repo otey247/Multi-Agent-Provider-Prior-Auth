@@ -35,6 +35,8 @@ class ToolResult(BaseModel):
     started_offset_ms: int = 0
     args_summary: str = ""
     result_summary: str = ""
+    args_full: str = ""       # PHI-redacted full request payload (Debug Console)
+    result_full: str = ""     # PHI-redacted full response payload (Debug Console)
 
 
 # --- Per-agent result models ---
@@ -231,6 +233,24 @@ class TraceToolCall(BaseModel):
     started_offset_ms: int = 0
     args_summary: str = ""
     result_summary: str = ""
+    args_full: str = ""
+    result_full: str = ""
+
+
+class TraceStep(BaseModel):
+    """A single ordered step within an agent — a model call or a tool call."""
+
+    kind: str = "tool"  # "llm" | "tool"
+    name: str = ""      # e.g. "model.call" or the tool name
+    status: str = "done"
+    server_label: str = ""
+    model: str = ""
+    duration_ms: int = 0
+    started_offset_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    args_full: str = ""
+    result_full: str = ""
 
 
 class TraceAgent(BaseModel):
@@ -238,7 +258,10 @@ class TraceAgent(BaseModel):
     status: str = ""  # "done" | "warning" | "error"
     duration_ms: int = 0
     model: str = ""
+    response_id: str = ""
+    session_id: str = ""   # Foundry x-agent-session-id (for logstream)
     tool_calls: list[TraceToolCall] = []
+    steps: list[TraceStep] = []   # ordered llm + tool steps
 
 
 class TracePhase(BaseModel):
@@ -249,12 +272,28 @@ class TracePhase(BaseModel):
     agents: list[TraceAgent] = []
 
 
+class TraceEvent(BaseModel):
+    """A flat, navigable event for the ADK-style Event inspector."""
+
+    id: int = 0
+    type: str = ""  # "user_input" | "llm_call" | "tool_call" | "final"
+    phase: str = ""
+    agent: str = ""
+    label: str = ""
+    status: str = ""
+    duration_ms: int = 0
+    started_offset_ms: int = 0
+    request: str = ""   # raw (redacted) request JSON/text
+    response: str = ""  # raw (redacted) response JSON/text
+
+
 class ExecutionTrace(BaseModel):
     request_id: str = ""
     started_at: str = ""
     completed_at: str = ""
     total_duration_ms: int = 0
     phases: list[TracePhase] = []
+    events: list[TraceEvent] = []
 
 
 class ReviewResponse(BaseModel):

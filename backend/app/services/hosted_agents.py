@@ -407,6 +407,21 @@ async def _invoke_foundry_agent(
 
         result = _parse_foundry_http_response(response, agent_name)
 
+        # Capture Foundry correlation IDs for the Debug Console (session
+        # logstream + App Insights trace lookup). Underscore-prefixed so they
+        # are read by the orchestrator trace builder but dropped by Pydantic
+        # when the agent result is parsed into the typed response model.
+        if isinstance(result, dict):
+            session_id = response.headers.get("x-agent-session-id", "")
+            if session_id:
+                result.setdefault("_foundry_session_id", session_id)
+            try:
+                envelope = response.json()
+                if isinstance(envelope, dict) and envelope.get("id"):
+                    result.setdefault("_foundry_response_id", str(envelope["id"]))
+            except ValueError:
+                pass
+
         if result.get("error"):
             logger.warning(
                 "Foundry Hosted Agent %s (%s) returned error: %s",

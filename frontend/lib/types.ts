@@ -198,6 +198,23 @@ export interface TraceToolCall {
   started_offset_ms: number;
   args_summary: string;
   result_summary: string;
+  args_full?: string;    // PHI-redacted raw JSON/text string
+  result_full?: string;  // PHI-redacted raw JSON/text string
+}
+
+// Per-agent ordered interleave of model calls (kind=llm) and tool calls (kind=tool).
+export interface TraceStep {
+  kind: "llm" | "tool";
+  name: string;
+  status: string;
+  server_label?: string;
+  model?: string;
+  duration_ms: number;
+  started_offset_ms: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  args_full?: string;
+  result_full?: string;
 }
 
 export interface TraceAgent {
@@ -205,7 +222,10 @@ export interface TraceAgent {
   status: "done" | "warning" | "error";
   duration_ms: number;
   model: string;
+  response_id?: string;  // correlation id for App Insights spans
+  session_id?: string;   // Foundry session id for log streaming
   tool_calls: TraceToolCall[];
+  steps?: TraceStep[];
 }
 
 export interface TracePhase {
@@ -216,12 +236,70 @@ export interface TracePhase {
   agents: TraceAgent[];
 }
 
+// Flat, run-wide ordered list backing the Event inspector.
+export interface TraceEvent {
+  id: number;
+  type: "user_input" | "llm_call" | "tool_call" | "final";
+  phase: string;
+  agent: string;
+  label: string;
+  status: string;
+  duration_ms: number;
+  started_offset_ms: number;
+  request: string;   // PHI-redacted raw JSON/text string
+  response: string;  // PHI-redacted raw JSON/text string
+}
+
 export interface ExecutionTrace {
   request_id: string;
   started_at: string;
   completed_at: string;
   total_duration_ms: number;
   phases: TracePhase[];
+  events?: TraceEvent[];
+}
+
+// --- Observability endpoint types ---
+
+// SSE frame from GET /api/observability/logs/{agent_name}/{session_id}
+export interface LogFrame {
+  stream: "stdout" | "stderr" | "status";
+  message: string;
+  timestamp: string;
+  // Preamble frame may carry session/agent metadata instead of a log line.
+  session_state?: string;
+  agent?: string;
+  version?: string;
+}
+
+// One span from GET /api/observability/traces/{correlation_id}
+export interface RunSpan {
+  timestamp: string;
+  name: string;
+  operation: string;
+  gen_model: string;
+  tool: string;
+  agent: string;
+  in_tok: number;
+  out_tok: number;
+  duration: number;
+  success: boolean;
+  operation_Id: string;
+  id: string;
+}
+
+export interface RunSpansResponse {
+  available: boolean;
+  reason: string;
+  spans: RunSpan[];
+}
+
+// GET /api/observability/links/{correlation_id}
+export interface ObsLinks {
+  app_insights?: string;
+  foundry_traces?: string;
+  foundry_project?: string;
+  correlation_id?: string;
 }
 
 export interface ReviewResponse {
