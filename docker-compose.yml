@@ -47,9 +47,10 @@ services:
     environment:
       - AZURE_AI_PROJECT_ENDPOINT=${AZURE_AI_PROJECT_ENDPOINT}
       - AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-4o}
-      - MCP_ICD10_CODES=${MCP_ICD10_CODES:-https://mcp.deepsense.ai/icd10_codes/mcp}
-      - MCP_PUBMED=${MCP_PUBMED:-https://pubmed.mcp.claude.com/mcp}
-      - MCP_CLINICAL_TRIALS=${MCP_CLINICAL_TRIALS:-https://mcp.deepsense.ai/clinical_trials/mcp}
+      # MCP tools come from the Foundry Toolbox (TOOLBOX_ENDPOINT) in cloud deploys,
+      # wired by scripts/register_agents.py. Local docker-compose has no Foundry
+      # Toolbox, so the agent runs without MCP tools. (Retired mcp.deepsense.ai
+      # URLs removed — the agent never read these MCP_* vars.)
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]
@@ -70,8 +71,10 @@ services:
     environment:
       - AZURE_AI_PROJECT_ENDPOINT=${AZURE_AI_PROJECT_ENDPOINT}
       - AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-4o}
-      - MCP_NPI_REGISTRY=${MCP_NPI_REGISTRY:-https://mcp.deepsense.ai/npi_registry/mcp}
-      - MCP_CMS_COVERAGE=${MCP_CMS_COVERAGE:-https://mcp.deepsense.ai/cms_coverage/mcp}
+      # MCP tools come from the Foundry Toolbox (TOOLBOX_ENDPOINT) in cloud deploys,
+      # wired by scripts/register_agents.py. Local docker-compose has no Foundry
+      # Toolbox, so the agent runs without MCP tools. (Retired mcp.deepsense.ai
+      # URLs removed — the agent never read these MCP_* vars.)
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]

@@ -1,8 +1,13 @@
 # Foundry Hosted Agent descriptor — Coverage Assessment Agent
-# Deploy with: az ai agent deploy --file agent.yaml
 #
-# MCP connections: self-managed via MCPStreamableHTTPTool in main.py
-# No Foundry Tool MCP registration required for DeepSense servers.
+# Deployed by scripts/register_agents.py (builds the agent via AIProjectClient),
+# NOT via `az ai agent deploy --file agent.yaml`. This file is a human-readable
+# descriptor of the agent's shape.
+#
+# MCP tools (NPI Registry, CMS Coverage) are provided through the Foundry Toolbox
+# "coverage-tools" (see scripts/create_toolbox.py), which Foundry proxies to the
+# self-hosted mcp-medical-data container. The agent reads TOOLBOX_ENDPOINT at
+# runtime — it does not read per-server MCP URLs.
 
 name: coverage-assessment-agent
 description: >
@@ -25,13 +30,10 @@ env:
   - name: AZURE_OPENAI_DEPLOYMENT_NAME
     value: gpt-5.4
 
-  # DeepSense NPI Registry MCP server
-  - name: MCP_NPI_REGISTRY
-    value: https://mcp.deepsense.ai/npi_registry/mcp
-
-  # DeepSense CMS Coverage MCP server
-  - name: MCP_CMS_COVERAGE
-    value: https://mcp.deepsense.ai/cms_coverage/mcp
+  # MCP tools (NPI Registry, CMS Coverage) come from the Foundry Toolbox
+  # "coverage-tools" via TOOLBOX_ENDPOINT, injected at registration time by
+  # scripts/register_agents.py. The retired mcp.deepsense.ai per-server URLs were
+  # removed (the agent never read these env vars).
 
   # Azure Application Insights (optional)
   - name: APPLICATION_INSIGHTS_CONNECTION_STRING
