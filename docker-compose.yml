@@ -47,10 +47,11 @@ services:
     environment:
       - AZURE_AI_PROJECT_ENDPOINT=${AZURE_AI_PROJECT_ENDPOINT}
       - AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-4o}
-      # MCP tools come from the Foundry Toolbox (TOOLBOX_ENDPOINT) in cloud deploys,
-      # wired by scripts/register_agents.py. Local docker-compose has no Foundry
-      # Toolbox, so the agent runs without MCP tools. (Retired mcp.deepsense.ai
-      # URLs removed — the agent never read these MCP_* vars.)
+      # MCP tools come from the Foundry Toolbox. With TOOLBOX_ENDPOINT unset here,
+      # the agent derives the toolbox URL from AZURE_AI_PROJECT_ENDPOINT (the cloud
+      # Foundry project) + TOOLBOX_NAME, so tools work only if that endpoint, Azure
+      # credentials, and the toolbox exist — otherwise the agent degrades
+      # gracefully. (Retired mcp.deepsense.ai URLs removed — never read.)
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]
@@ -71,10 +72,11 @@ services:
     environment:
       - AZURE_AI_PROJECT_ENDPOINT=${AZURE_AI_PROJECT_ENDPOINT}
       - AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-4o}
-      # MCP tools come from the Foundry Toolbox (TOOLBOX_ENDPOINT) in cloud deploys,
-      # wired by scripts/register_agents.py. Local docker-compose has no Foundry
-      # Toolbox, so the agent runs without MCP tools. (Retired mcp.deepsense.ai
-      # URLs removed — the agent never read these MCP_* vars.)
+      # MCP tools come from the Foundry Toolbox. With TOOLBOX_ENDPOINT unset here,
+      # the agent derives the toolbox URL from AZURE_AI_PROJECT_ENDPOINT (the cloud
+      # Foundry project) + TOOLBOX_NAME, so tools work only if that endpoint, Azure
+      # credentials, and the toolbox exist — otherwise the agent degrades
+      # gracefully. (Retired mcp.deepsense.ai URLs removed — never read.)
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]
