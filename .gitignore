@@ -42,3 +42,10 @@ docs/*.pptx
 # Coding Agents
 .codex/
 .claude/
+
+# Demo recorder (walkthrough video) — commit only the final MP4s + script
+scripts/demo/node_modules/
+docs/videos/_raw/
+docs/videos/_downloads/
+docs/videos/qa/
+*.webm

@@ -1,0 +1,14 @@
+{
+  "name": "prior-auth-demo-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Playwright director that records the captioned walkthrough video + narration script.",
+  "scripts": {
+    "record": "node record-walkthrough.mjs",
+    "script": "node gen-script.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.61.0"
+  }
+}
