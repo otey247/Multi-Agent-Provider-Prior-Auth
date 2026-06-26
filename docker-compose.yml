@@ -47,9 +47,11 @@ services:
     environment:
       - AZURE_AI_PROJECT_ENDPOINT=${AZURE_AI_PROJECT_ENDPOINT}
       - AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-4o}
-      - MCP_ICD10_CODES=${MCP_ICD10_CODES:-https://mcp.deepsense.ai/icd10_codes/mcp}
-      - MCP_PUBMED=${MCP_PUBMED:-https://pubmed.mcp.claude.com/mcp}
-      - MCP_CLINICAL_TRIALS=${MCP_CLINICAL_TRIALS:-https://mcp.deepsense.ai/clinical_trials/mcp}
+      # MCP tools come from the Foundry Toolbox. With TOOLBOX_ENDPOINT unset here,
+      # the agent derives the toolbox URL from AZURE_AI_PROJECT_ENDPOINT (the cloud
+      # Foundry project) + TOOLBOX_NAME, so tools work only if that endpoint, Azure
+      # credentials, and the toolbox exist — otherwise the agent degrades
+      # gracefully. (Retired mcp.deepsense.ai URLs removed — never read.)
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]
@@ -70,8 +72,11 @@ services:
     environment:
       - AZURE_AI_PROJECT_ENDPOINT=${AZURE_AI_PROJECT_ENDPOINT}
       - AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-4o}
-      - MCP_NPI_REGISTRY=${MCP_NPI_REGISTRY:-https://mcp.deepsense.ai/npi_registry/mcp}
-      - MCP_CMS_COVERAGE=${MCP_CMS_COVERAGE:-https://mcp.deepsense.ai/cms_coverage/mcp}
+      # MCP tools come from the Foundry Toolbox. With TOOLBOX_ENDPOINT unset here,
+      # the agent derives the toolbox URL from AZURE_AI_PROJECT_ENDPOINT (the cloud
+      # Foundry project) + TOOLBOX_NAME, so tools work only if that endpoint, Azure
+      # credentials, and the toolbox exist — otherwise the agent degrades
+      # gracefully. (Retired mcp.deepsense.ai URLs removed — never read.)
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]

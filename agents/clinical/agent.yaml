@@ -1,8 +1,15 @@
 # Foundry Hosted Agent descriptor — Clinical Reviewer Agent
-# Deploy with: az ai agent deploy --file agent.yaml
 #
-# MCP connections: self-managed via MCPStreamableHTTPTool in main.py
-# No Foundry Tool MCP registration required for DeepSense servers.
+# Deployed by scripts/register_agents.py (builds the agent via AIProjectClient),
+# NOT via `az ai agent deploy --file agent.yaml`. This file is a human-readable
+# descriptor of the agent's shape.
+#
+# MCP tools (ICD-10, PubMed, ClinicalTrials.gov) are provided through the Foundry
+# Toolbox "clinical-tools" (see scripts/create_toolbox.py), which Foundry proxies
+# to the self-hosted mcp-medical-data container + PubMed. At runtime the agent
+# resolves the toolbox endpoint from TOOLBOX_ENDPOINT, or — if unset — derives it
+# from AZURE_AI_PROJECT_ENDPOINT + TOOLBOX_NAME (see _toolbox_url in main.py).
+# It does not read per-server MCP URLs.
 
 name: clinical-reviewer-agent
 description: >
@@ -25,17 +32,10 @@ env:
   - name: AZURE_OPENAI_DEPLOYMENT_NAME
     value: gpt-5.4
 
-  # DeepSense ICD-10 MCP server
-  - name: MCP_ICD10_CODES
-    value: https://mcp.deepsense.ai/icd10_codes/mcp
-
-  # Anthropic PubMed MCP server
-  - name: MCP_PUBMED
-    value: https://pubmed.mcp.claude.com/mcp
-
-  # DeepSense Clinical Trials MCP server
-  - name: MCP_CLINICAL_TRIALS
-    value: https://mcp.deepsense.ai/clinical_trials/mcp
+  # MCP tools (ICD-10, PubMed, ClinicalTrials.gov) come from the Foundry Toolbox
+  # "clinical-tools". register_agents.py injects TOOLBOX_ENDPOINT; if it is unset
+  # the agent derives the toolbox URL from AZURE_AI_PROJECT_ENDPOINT + TOOLBOX_NAME.
+  # The retired mcp.deepsense.ai per-server URLs were removed (never read).
 
   # Azure Application Insights (optional)
   - name: APPLICATION_INSIGHTS_CONNECTION_STRING
