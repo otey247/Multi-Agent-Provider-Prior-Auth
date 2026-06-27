@@ -9,6 +9,10 @@ This document is written for prior-authorization coordinators, utilization-revie
 nurses, revenue-cycle staff, and anyone who wants to understand the tool without
 reading code. No technical background needed.
 
+▶ **Prefer to watch?** A captioned video walkthrough covers the same flow —
+a [~2-minute teaser](videos/walkthrough-teaser.mp4) and a
+[~5-minute deep-dive](videos/walkthrough-deepdive.mp4) ([chapters](videos/chapters.md)).
+
 > **About the screenshots in this guide.** They are captured from a live run of
 > the current app using the same Orthopedics sample case. Because the four agents
 > reason in real time, the exact confidence score and the number of policy
