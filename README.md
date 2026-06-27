@@ -399,6 +399,7 @@ By using the *Provider Prior Authorization Multi-Agent Solution Accelerator*, or
 
 | Document | Description |
 |----------|-------------|
+| [How It Works — From Intake to Report](./docs/how-it-works.md) | **Start here (non-technical).** Illustrated, plain-language walkthrough of the whole flow — intake → four-specialist review → submission-readiness gates → PDF report — following a real orthopedic example. A standalone visual version ships at [how-it-works.html](./docs/how-it-works.html) |
 | [Deployment Guide](./docs/DeploymentGuide.md) | Step-by-step deployment instructions — Docker Compose, local development, Azure Container Apps, prerequisites, environment configuration, troubleshooting |
 | [Architecture](./docs/architecture.md) | Detailed hosted-agent-ready architecture, runtime modes, MCP integration, agent details, decision rubric, confidence scoring, and audit justification |
 | [Provider Integration Guide](./docs/provider-integration-guide.md) | Provider-friendly integration patterns for EHR, HL7, referral, document ingestion, and staff work queues |
