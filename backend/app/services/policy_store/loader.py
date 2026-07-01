@@ -16,17 +16,30 @@ from pathlib import Path
 
 from app.models.standards import PolicySet
 
-# backend/app/services/policy_store/loader.py -> repo root is parents[4]
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-_DEFAULT_PACKS_DIR = _REPO_ROOT / "policy-packs"
+# loader.py path: <backend>/app/services/policy_store/loader.py
+#   parents[3] = <backend>      -> bundled packs that ship inside the image
+#   parents[4] = <repo root>    -> monorepo authoring location (local dev)
+_HERE = Path(__file__).resolve()
+# Bundled with the backend so it is present in the container image
+# (Dockerfile: COPY policy_packs/ ./policy_packs/). This is the canonical dir.
+_BUNDLED_PACKS_DIR = _HERE.parents[3] / "policy_packs"
+# Repo-root fallback for local monorepo authoring (not shipped in the image).
+_REPO_ROOT_PACKS_DIR = _HERE.parents[4] / "policy-packs"
 
 POLICY_PACK_FILENAME = "policy_set.json"
 
 
-def policy_packs_dir() -> Path:
-    """Resolve the policy-packs directory (env override or repo default)."""
+def _candidate_dirs() -> list[Path]:
+    """Directories to scan for policy packs, in priority order."""
     override = os.getenv("POLICY_PACKS_DIR", "").strip()
-    return Path(override) if override else _DEFAULT_PACKS_DIR
+    if override:
+        return [Path(override)]
+    return [_BUNDLED_PACKS_DIR, _REPO_ROOT_PACKS_DIR]
+
+
+def policy_packs_dir() -> Path:
+    """Primary policy-packs directory (env override or bundled default)."""
+    return _candidate_dirs()[0]
 
 
 def _load_pack_file(path: Path) -> PolicySet | None:
@@ -41,20 +54,23 @@ def _load_pack_file(path: Path) -> PolicySet | None:
 def load_policy_packs() -> list[PolicySet]:
     """Load and cache every valid policy pack found on disk.
 
-    Returns an empty list when the directory is missing — the standards layer
-    is optional and the review pipeline must degrade gracefully without it.
+    Scans the candidate directories in priority order (bundled, then
+    repo-root), de-duplicating by ``policy_set_id`` so the shipped copy wins.
+    Returns an empty list when no directory exists — the standards layer is
+    optional and the review pipeline must degrade gracefully without it.
     """
-    base = policy_packs_dir()
-    if not base.is_dir():
-        return []
-
     packs: list[PolicySet] = []
-    for entry in sorted(base.iterdir()):
-        pack_file = entry / POLICY_PACK_FILENAME if entry.is_dir() else None
-        if pack_file and pack_file.is_file():
-            pack = _load_pack_file(pack_file)
-            if pack and pack.policy_set_id:
-                packs.append(pack)
+    seen: set[str] = set()
+    for base in _candidate_dirs():
+        if not base.is_dir():
+            continue
+        for entry in sorted(base.iterdir()):
+            pack_file = entry / POLICY_PACK_FILENAME if entry.is_dir() else None
+            if pack_file and pack_file.is_file():
+                pack = _load_pack_file(pack_file)
+                if pack and pack.policy_set_id and pack.policy_set_id not in seen:
+                    seen.add(pack.policy_set_id)
+                    packs.append(pack)
     return packs
 
 

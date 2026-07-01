@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.observability import setup_observability
-from app.routers import review, decision, agents, observability
+from app.routers import review, decision, agents, observability, standards
 
 # Configure logging for the app namespace
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -36,6 +36,7 @@ app.include_router(review.router, prefix="/api")
 app.include_router(decision.router, prefix="/api")
 app.include_router(agents.router, prefix="/api")
 app.include_router(observability.router, prefix="/api")
+app.include_router(standards.router, prefix="/api")
 
 
 @app.get("/health")

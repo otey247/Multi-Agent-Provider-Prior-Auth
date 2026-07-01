@@ -21,6 +21,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app/ ./app/
 
+# Copy standards-aligned policy packs (CMS-0057 / Da Vinci — PRD Component F).
+# Bundled here so they ship in the image; the ./backend build context cannot
+# reach a repo-root directory. Loader resolves <backend>/policy_packs.
+COPY policy_packs/ ./policy_packs/
+
 # Non-root user for security
 RUN useradd --create-home appuser && chown -R appuser:appuser /app
 USER appuser
