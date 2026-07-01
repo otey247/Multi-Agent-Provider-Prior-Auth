@@ -129,15 +129,20 @@ def main() -> int:
     cov = ar.get("coverage") or {}
     comp = ar.get("compliance") or {}
     psid = standards.get("policy_set_id", "")
+    cov_pack_policy = [p for p in (cov.get("coverage_policies") or [])
+                       if psid and str(p.get("policy_id")) == psid]
     cov_pack = [c for c in (cov.get("criteria_assessment") or [])
-                if psid and psid in str(c.get("source", ""))]
-    comp_pack = [ci for ci in (comp.get("checklist") or [])
+                if "pack" in str(c.get("source", "")).lower()
+                or (psid and psid in str(c.get("source", "")))]
+    checklist = comp.get("checklist") or []
+    comp_pack = [ci for ci in checklist
                  if str(ci.get("detail", "")).lstrip().startswith("[req-")]
-    print("\n-- requirement-aware agents (informational; needs agent redeploy) --")
-    print(f"  coverage criteria citing pack '{psid}': {len(cov_pack)}")
-    for c in cov_pack[:8]:
-        print(f"    - {c.get('status')}: {str(c.get('criterion'))[:66]}")
-    print(f"  compliance checklist items citing requirement ids: {len(comp_pack)}")
+    print("\n-- requirement-aware agents (informational) --")
+    print(f"  coverage: pack policy entry = {bool(cov_pack_policy)}; pack-sourced criteria = {len(cov_pack)}")
+    for c in cov_pack[:12]:
+        print(f"    - {c.get('status')}: {str(c.get('criterion'))[:60]}")
+    print(f"  compliance: checklist items = {len(checklist)} "
+          f"(payer-appended beyond 10 = {max(0, len(checklist) - 10)}; citing req ids = {len(comp_pack)})")
 
     print("\nRESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

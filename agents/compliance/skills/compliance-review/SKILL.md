@@ -63,6 +63,13 @@ is **additive**: when `policy_requirements` is present and non-empty, evaluate
 each listed requirement IN ADDITION TO the 10 standard items above. When it is
 absent, behave exactly as specified — the 10 standard items only.
 
+**IMPORTANT:** when `policy_requirements` is present, your `checklist` array MUST
+contain MORE than 10 entries — the 10 standard items PLUS one entry per payer
+requirement in `policy_requirements.documentation_requirements`. Returning exactly
+10 items when payer requirements were provided is an ERROR. The "10 checklist
+items" rule elsewhere in this skill is a *minimum floor*, not a cap, whenever
+payer requirements are supplied.
+
 For each entry in `policy_requirements.documentation_requirements`:
 - Decide whether the submitted request, clinical notes, prior treatment history,
   and attached documents satisfy it: **complete** (clearly present), **incomplete**
@@ -142,8 +149,13 @@ Return JSON with this exact structure:
 </output_contract>
 
 <completeness_contract>
-- Treat the task as incomplete until all 10 checklist items are evaluated with a valid status.
+- Treat the task as incomplete until all 10 standard checklist items are evaluated with a valid status.
 - Keep an internal checklist of the 10 required items and confirm each is processed before finalizing.
+- When the request includes a non-empty `policy_requirements`, ALSO evaluate every
+  entry in `policy_requirements.documentation_requirements` and append each to the
+  `checklist` (so the checklist exceeds 10 items); the task is incomplete until
+  every payer requirement has also been processed and any unmet required ones are
+  in `missing_items`.
 - Do not finalize until overall_status and additional_info_requests are populated.
 - If any item is blocked by ambiguous data, mark it with the appropriate status and explain in detail.
 </completeness_contract>
