@@ -166,6 +166,33 @@ After finding policies, note: "Coverage policies are sourced from Medicare
 LCDs/NCDs. If this review is for a commercial or Medicare Advantage plan,
 payer-specific policies may differ."
 
+#### Step 3b: Payer-Specific Policy Pack (when provided)
+
+The request MAY include a `payer_policy_pack` object when a payer/plan/procedure-
+specific policy pack matched this case (e.g., a commercial plan's own lumbar-fusion
+policy) — a CMS-0057 / Da Vinci-aligned requirement set. This is **additive**:
+when `payer_policy_pack` is present and non-empty:
+- Treat its `medical_necessity_criteria` and required `documentation_requirements`
+  as the **authoritative payer policy for this plan**, alongside any Medicare
+  LCD/NCD you find. This is how you assess commercial / Medicare Advantage plans
+  that carry their own criteria rather than relying on Medicare policy.
+- For each `medical_necessity_criteria` entry, and each required
+  `documentation_requirements` entry, add an entry to `criteria_assessment`:
+  - `criterion`: the `criterion_name` (or the requirement `description`).
+  - `status`: map the clinical evidence to MET / NOT_MET / INSUFFICIENT with a
+    confidence score, exactly as in Step 5.
+  - `evidence`: cite the specific clinical findings from the Clinical Reviewer.
+  - `source`: the pack's `policy_set_id` (e.g. `"uhc-commercial-lumbar-fusion-v1"`).
+- Add a `coverage_policies` entry for the pack:
+  `{"policy_id": "<policy_set_id>", "title": "<payer> <plan> policy pack", "type": "Article", "relevant": true}`.
+- You MAY still search Medicare LCDs/NCDs (Step 3) for supplementary context, but
+  when a `payer_policy_pack` is present its plan-specific requirements take
+  precedence, and the limitation notice should state that a plan-specific policy
+  pack was applied (so it is clear the assessment is NOT Medicare-only).
+
+When `payer_policy_pack` is absent, follow Steps 3–6 exactly as specified
+(Medicare LCD/NCD search under the "reasonable and necessary" standard).
+
 #### Step 4: Get Policy Details
 
 For each relevant NCD/LCD found:

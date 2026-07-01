@@ -55,6 +55,34 @@ Verify the presence and validity of each item:
     "incomplete" if ambiguous. Downstream agents use this to select the
     correct CMS coverage policy search strategy. Non-blocking.
 
+### Payer-Specific Documentation Requirements (when provided)
+
+The request MAY include a `policy_requirements` object when a payer/plan-specific
+policy pack matched this case (CMS-0057 / Da Vinci DTR-style requirements). This
+is **additive**: when `policy_requirements` is present and non-empty, evaluate
+each listed requirement IN ADDITION TO the 10 standard items above. When it is
+absent, behave exactly as specified — the 10 standard items only.
+
+For each entry in `policy_requirements.documentation_requirements`:
+- Decide whether the submitted request, clinical notes, prior treatment history,
+  and attached documents satisfy it: **complete** (clearly present), **incomplete**
+  (partially/ambiguously present, or a `conditional` item that cannot be
+  confirmed), or **missing** (absent). For entries with `attachment_required: true`,
+  the document must be named in the attached documents/note types — a mention in
+  the narrative alone is **incomplete**, not complete.
+- Append a `checklist` entry AFTER the 10 standard items: set `item` to the
+  requirement's `description`, and begin `detail` with the requirement_id in
+  brackets, e.g. `"[req-conservative-therapy] PT, injections, and NSAID trial
+  documented in prior treatment history."`
+- If a requirement with `required: true` and `conditional: false` is not
+  "complete", add it to `missing_items` and add a specific, requirement_id-cited
+  ask to `additional_info_requests`.
+
+Do NOT remove, reorder, or renumber the 10 standard items — payer-specific entries
+are appended after them. The `overall_status` blocking rule is still driven by the
+standard blocking items (1, 2, 4, 5, 6, 7); payer-specific requirements surface via
+`missing_items` / `additional_info_requests`, not by changing that rule.
+
 ### Output Format
 
 Return JSON with this exact structure:

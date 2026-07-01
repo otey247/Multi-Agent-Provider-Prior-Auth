@@ -410,6 +410,48 @@ def _coerce_list(value) -> list[str]:
     return []
 
 
+def _pack_agent_context(policy_match) -> dict | None:
+    """Compact, agent-facing view of a matched policy pack (requirement-aware mode).
+
+    Injected into the Compliance and Coverage agent payloads so those agents can
+    ALSO reason over the payer/plan-specific requirement set (in addition to the
+    deterministic standards layer). Returns None when no pack matched, so the
+    agents keep their default behavior.
+    """
+    if not policy_match or not getattr(policy_match, "matched", False):
+        return None
+    ps = getattr(policy_match, "policy_set", None)
+    if ps is None:
+        return None
+    return {
+        "policy_set_id": ps.policy_set_id,
+        "payer": ps.payer,
+        "plan": ps.plan,
+        "line_of_business": ps.line_of_business,
+        "delegated_vendor": ps.delegated_vendor,
+        "documentation_requirements": [
+            {
+                "requirement_id": r.requirement_id,
+                "description": r.description,
+                "requirement_type": r.requirement_type,
+                "required": r.required,
+                "conditional": r.conditional,
+                "attachment_required": r.attachment_required,
+            }
+            for r in ps.documentation_requirements
+        ],
+        "medical_necessity_criteria": [
+            {
+                "criterion_id": c.criterion_id,
+                "criterion_name": c.criterion_name,
+                "rationale": c.human_readable_rationale,
+                "required_status": c.required_status,
+            }
+            for c in ps.medical_necessity_criteria
+        ],
+    }
+
+
 def _build_clinical_fallback_result(
     request_data: dict,
     cpt_validation: dict,
@@ -1176,6 +1218,10 @@ async def _run_review_pipeline(
             logger.warning("Policy pack match skipped: %s", exc)
             policy_match = None
 
+    # Compact requirement set fed to the Compliance + Coverage agents so they can
+    # reason over the payer-specific requirements (None when no pack matched).
+    pack_ctx = _pack_agent_context(policy_match)
+
     # --- Phase 1: Parallel — Documentation Completeness + Clinical Evidence Retrieval ---
     logger.info("Phase 1: Running Documentation Completeness and Clinical Evidence agents in parallel")
 
@@ -1192,10 +1238,15 @@ async def _run_review_pipeline(
         },
     })
 
+    # Requirement-aware mode: give Compliance the payer-specific requirement set.
+    compliance_request = dict(request_data)
+    if pack_ctx:
+        compliance_request["policy_requirements"] = pack_ctx
+
     _p1_start = _off()
     with tracer.start_as_current_span("phase_1_parallel") as p1_span:
         compliance_task = asyncio.create_task(
-            _timed("Compliance Agent", run_compliance_review, request_data)
+            _timed("Compliance Agent", run_compliance_review, compliance_request)
         )
         clinical_task = asyncio.create_task(
             _timed("Clinical Reviewer Agent", run_clinical_review, clinical_request)
@@ -1271,10 +1322,16 @@ async def _run_review_pipeline(
         },
     })
 
+    # Requirement-aware mode: give Coverage the payer-specific policy pack so it
+    # maps evidence to the plan's criteria (not just Medicare LCD/NCD search).
+    coverage_request = dict(request_data)
+    if pack_ctx:
+        coverage_request["payer_policy_pack"] = pack_ctx
+
     _p2_start = _off()
     with tracer.start_as_current_span("phase_2_coverage") as p2_span:
         coverage_result, _cov_ms = await _timed(
-            "Coverage Agent", run_coverage_review, request_data, clinical_result
+            "Coverage Agent", run_coverage_review, coverage_request, clinical_result
         )
 
         if _is_hosted_agent_error(coverage_result):

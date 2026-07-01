@@ -105,8 +105,8 @@ def main() -> int:
     print(f"  policy_pack_matched : {standards.get('policy_pack_matched')} ({standards.get('policy_set_id')})")
     print(f"  CRD pa_required     : {crd.get('pa_required')}  route={crd.get('routing_channel')}")
     print(f"  DTR met             : {dtr.get('requirements_met')}/{dtr.get('requirements_total')}")
-    for e in dtr.get("requirement_evaluations", []):
-        print(f"    [{e.get('status'):12}] {e.get('requirement_id')}")
+    for ev in dtr.get("requirement_evaluations", []):
+        print(f"    [{ev.get('status'):12}] {ev.get('requirement_id')}")
     print(f"  PAS ready           : {pas.get('pas_ready')}  channel={pas.get('submission_channel')}")
 
     ok = True
@@ -121,6 +121,24 @@ def main() -> int:
     check("CRD pa_required True", crd.get("pa_required") is True)
     check("DTR 6/8 requirements met", dtr.get("requirements_met") == 6)
     check("PAS not ready (PT discharge gap)", pas.get("pas_ready") is False)
+
+    # Informational: requirement-aware agents (needs agent redeploy to activate).
+    # Not asserted — LLM output varies; this just shows whether the hosted
+    # Compliance/Coverage agents consumed the injected policy pack.
+    ar = data.get("agent_results") or {}
+    cov = ar.get("coverage") or {}
+    comp = ar.get("compliance") or {}
+    psid = standards.get("policy_set_id", "")
+    cov_pack = [c for c in (cov.get("criteria_assessment") or [])
+                if psid and psid in str(c.get("source", ""))]
+    comp_pack = [ci for ci in (comp.get("checklist") or [])
+                 if str(ci.get("detail", "")).lstrip().startswith("[req-")]
+    print("\n-- requirement-aware agents (informational; needs agent redeploy) --")
+    print(f"  coverage criteria citing pack '{psid}': {len(cov_pack)}")
+    for c in cov_pack[:8]:
+        print(f"    - {c.get('status')}: {str(c.get('criterion'))[:66]}")
+    print(f"  compliance checklist items citing requirement ids: {len(comp_pack)}")
+
     print("\nRESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
