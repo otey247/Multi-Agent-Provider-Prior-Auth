@@ -186,6 +186,60 @@ export interface SynthesisAuditTrail {
   agents_consulted?: string[];
 }
 
+// --- CMS-0057 / Da Vinci standards-aligned view (CRD/DTR/PAS) ---
+
+export interface CrdDetermination {
+  pa_required: boolean | null;
+  routing_channel: string;
+  delegated_vendor: string;
+  determination_source: string; // "policy_pack" | "runtime_search" | "unknown"
+  reasons: string[];
+}
+
+export interface RequirementEvaluation {
+  requirement_id: string;
+  description: string;
+  requirement_type: string;
+  required: boolean;
+  conditional: boolean;
+  status: "MET" | "INSUFFICIENT" | "MISSING" | "NOT_APPLICABLE";
+  confidence: number; // 0-100
+  evidence: string[];
+  gap_action: string;
+  source: string;
+}
+
+export interface DtrAssessment {
+  source: string; // "policy_pack" | "runtime_search"
+  questionnaire_id: string;
+  requirements_total: number;
+  requirements_met: number;
+  requirement_evaluations: RequirementEvaluation[];
+}
+
+export interface PasPreview {
+  pas_ready: boolean;
+  portal_ready: boolean;
+  submission_channel: string;
+  missing_for_submission: string[];
+  package_summary: Record<string, string>;
+}
+
+export interface StandardsAssessment {
+  enabled: boolean;
+  policy_pack_matched: boolean;
+  policy_set_id: string;
+  payer: string;
+  plan: string;
+  policy_name: string;
+  policy_version: string;
+  source_url: string;
+  crd?: CrdDetermination | null;
+  dtr?: DtrAssessment | null;
+  pas?: PasPreview | null;
+  disclaimer: string;
+}
+
 // --- Execution trace types (waterfall / timeline visualization) ---
 
 export interface TraceToolCall {
@@ -324,6 +378,9 @@ export interface ReviewResponse {
   audit_justification?: string;
   audit_justification_pdf?: string;
   execution_trace?: ExecutionTrace | null;
+  // CMS-0057 / Da Vinci standards-aligned view (CRD/DTR/PAS). Optional and
+  // additive — null when the standards layer is disabled or no pack matches.
+  standards?: StandardsAssessment | null;
 }
 
 // --- Progress tracking types (SSE streaming) ---

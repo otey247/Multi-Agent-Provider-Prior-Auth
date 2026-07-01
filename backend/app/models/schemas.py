@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.models.standards import StandardsAssessment
+
 
 class PriorAuthRequest(BaseModel):
     patient_name: str
@@ -318,6 +320,9 @@ class ReviewResponse(BaseModel):
     execution_trace: ExecutionTrace | None = None
     audit_justification: str | None = None
     audit_justification_pdf: str | None = None  # Base64-encoded PDF
+    # CMS-0057 / Da Vinci standards-aligned view (CRD/DTR/PAS). Optional and
+    # additive — null when the standards layer is disabled or no pack matches.
+    standards: StandardsAssessment | None = None
 
 
 # --- Decision & Notification models ---

@@ -117,6 +117,7 @@ def _build_review_response(request_id: str, result: dict) -> ReviewResponse:
         execution_trace=execution_trace,
         audit_justification=result.get("audit_justification"),
         audit_justification_pdf=result.get("audit_justification_pdf"),
+        standards=result.get("standards"),
     )
 
 

@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/tabs";
 import { ConfidenceBar } from "@/components/confidence-bar";
 import { AgentDetails } from "@/components/agent-details";
+import { StandardsPanel } from "@/components/standards-panel";
 import { DebugConsole } from "@/components/debug-console";
 import { DecisionPanel } from "@/components/decision-panel";
 import {
@@ -144,6 +145,9 @@ export function ReviewDashboard({ review: rawReview, liveTrace }: ReviewDashboar
           </div>
         </CardContent>
       </Card>
+
+      {/* CMS-0057 / Da Vinci standards alignment (CRD/DTR/PAS) */}
+      {review.standards && <StandardsPanel standards={review.standards} />}
 
       {/* Tool checks */}
       {(review.tool_results?.length ?? 0) > 0 && (

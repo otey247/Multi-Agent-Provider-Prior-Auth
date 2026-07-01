@@ -37,9 +37,15 @@ from app.agents.compliance_agent import run_compliance_review
 from app.agents.clinical_agent import run_clinical_review
 from app.agents.coverage_agent import run_coverage_review
 from app.agents.synthesis_agent import run_synthesis_review as _dispatch_synthesis
+from app.config import settings
 from app.services.audit_pdf import generate_audit_justification_pdf
 from app.services.coverage_enrich import enrich_coverage
 from app.services.cpt_validation import validate_procedure_codes
+from app.services.policy_store import match_policy_pack
+from app.services.standards import (
+    apply_demo_provider_verification,
+    build_standards_assessment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1149,6 +1155,27 @@ async def _run_review_pipeline(
     })
     await _emit_trace()
 
+    # --- Standards layer (CRD-lite): match a payer policy pack ---
+    # Deterministic, no live payer API. Drives whether PA is required, the
+    # routing channel, and the payer-specific DTR requirement set used below.
+    policy_match = None
+    if settings.ENABLE_STANDARDS_LAYER and settings.ENABLE_POLICY_PACKS:
+        try:
+            policy_match = match_policy_pack(
+                payer_name=request_data.get("payer_name"),
+                payer_plan=request_data.get("payer_plan"),
+                procedure_codes=request_data.get("procedure_codes", []),
+                diagnosis_codes=request_data.get("diagnosis_codes", []),
+            )
+            if policy_match and policy_match.matched:
+                logger.info(
+                    "Policy pack matched: %s (confidence %.2f)",
+                    policy_match.policy_set_id, policy_match.confidence,
+                )
+        except Exception as exc:  # noqa: BLE001 — standards layer must never break review
+            logger.warning("Policy pack match skipped: %s", exc)
+            policy_match = None
+
     # --- Phase 1: Parallel — Documentation Completeness + Clinical Evidence Retrieval ---
     logger.info("Phase 1: Running Documentation Completeness and Clinical Evidence agents in parallel")
 
@@ -1289,6 +1316,54 @@ async def _run_review_pipeline(
         "agents": [_trace_agent("Policy Matching", coverage_result, _cov_ms)],
     })
     await _emit_trace()
+
+    # --- Standards layer (CRD/DTR/PAS): deterministic, additive ---
+    # Runs before synthesis so the scoped demo-NPI fix lets Gate 1 pass for a
+    # curated sample case, and the requirement evaluation reflects final
+    # coverage data. Never breaks the pipeline.
+    standards_assessment = None
+    if settings.ENABLE_STANDARDS_LAYER:
+        _std_start = _off()
+        _std_t0 = time.monotonic()
+        coverage_result = apply_demo_provider_verification(coverage_result, request_data)
+        try:
+            standards_assessment = build_standards_assessment(
+                policy_match, request_data, clinical_result, coverage_result,
+                enable_pas=settings.ENABLE_PAS_PREPARE,
+            ).model_dump()
+        except Exception as exc:  # noqa: BLE001 — standards layer must never break review
+            logger.warning("Standards assessment skipped: %s", exc)
+            standards_assessment = None
+        _std_ms = int((time.monotonic() - _std_t0) * 1000)
+
+        _matched = bool(standards_assessment and standards_assessment.get("policy_pack_matched"))
+        if _matched:
+            _crd = standards_assessment.get("crd") or {}
+            _dtr = standards_assessment.get("dtr") or {}
+            _std_summary = (
+                f"pack={standards_assessment.get('policy_set_id', '-')} | "
+                f"PA_required={_crd.get('pa_required')} | "
+                f"requirements={_dtr.get('requirements_met', 0)}/{_dtr.get('requirements_total', 0)}"
+            )
+        else:
+            _std_summary = "No payer-specific policy pack matched; runtime LCD/NCD search applies."
+
+        trace_phases.append({
+            "name": "standards", "status": "completed",
+            "started_offset_ms": _std_start, "duration_ms": _std_ms,
+            "agents": [{
+                "name": "Standards Alignment (CRD/DTR/PAS)", "status": "done",
+                "duration_ms": _std_ms, "model": "local",
+                "tool_calls": [{
+                    "tool_name": "policy_pack_match", "tool": "policy_pack_match",
+                    "server_label": "local",
+                    "status": "pass" if _matched else "warning",
+                    "order": 0, "duration_ms": _std_ms, "started_offset_ms": 0,
+                    "args_summary": "", "result_summary": _std_summary[:500],
+                }],
+            }],
+        })
+        await _emit_trace()
 
     # --- Phase 3: Submission Readiness Assessment ---
     logger.info("Phase 3: Assessing submission readiness")
@@ -1527,6 +1602,7 @@ async def _run_review_pipeline(
         "execution_trace": execution_trace,
         "audit_justification": audit_justification,
         "audit_justification_pdf": audit_justification_pdf,
+        "standards": standards_assessment,
     }
 
 

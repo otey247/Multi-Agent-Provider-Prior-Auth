@@ -38,6 +38,18 @@ class Settings:
         os.getenv("HOSTED_AGENT_TIMEOUT_SECONDS", "180")
     )
 
+    # ── CMS-0057 / Da Vinci standards layer (PRD items-to-implement/PRD.md) ──────
+    # Policy packs are static, human-reviewed payer/plan/procedure requirement
+    # sets loaded from disk. No live payer API is called. The layer is optional
+    # and the review pipeline degrades gracefully to runtime search when off.
+    # Master switch for the standards-aligned (CRD/DTR/PAS) assessment block.
+    ENABLE_STANDARDS_LAYER: bool = os.getenv("ENABLE_STANDARDS_LAYER", "true").lower() == "true"
+    ENABLE_POLICY_PACKS: bool = os.getenv("ENABLE_POLICY_PACKS", "true").lower() == "true"
+    # Prepare a PAS-style package preview (never submits; real submission stays off).
+    ENABLE_PAS_PREPARE: bool = os.getenv("ENABLE_PAS_PREPARE", "true").lower() == "true"
+    # Override the policy-packs directory (defaults to <repo>/policy-packs).
+    POLICY_PACKS_DIR: str = os.getenv("POLICY_PACKS_DIR", "")
+
     # Optional auth/header for specific direct-HTTP deployments (rarely needed;
     # Foundry mode uses DefaultAzureCredential automatically).
     HOSTED_AGENT_AUTH_HEADER: str = os.getenv("HOSTED_AGENT_AUTH_HEADER", "Authorization")

@@ -51,10 +51,11 @@ interface DebugConsoleProps {
   trace: ExecutionTraceType | null;
 }
 
-const PHASE_LABELS: Record<PhaseId, string> = {
+const PHASE_LABELS: Record<string, string> = {
   preflight: "Pre-flight",
   phase_1: "Documentation + Clinical (parallel)",
   phase_2: "Policy Matching",
+  standards: "Standards Alignment (CRD/DTR/PAS)",
   phase_3: "Submission Readiness",
   phase_4: "Audit Trail",
 };
