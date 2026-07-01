@@ -1,17 +1,17 @@
-fastapi>=0.110.0
-uvicorn>=0.29.0
-python-dotenv>=1.0.0
-pydantic>=2.0.0
-httpx>=0.27.0
+fastapi>=0.138.2
+uvicorn>=0.49.0
+python-dotenv>=1.2.2
+pydantic>=2.13.4
+httpx>=0.28.1
 # MCP client — backend calls the medical-data MCP server directly to compute
 # provider taxonomies + the per-code coverage matrix deterministically
 # (removes LLM variance for these demo-critical fields).
-mcp>=1.9.0
-python-multipart>=0.0.9
-fpdf2>=2.8.0
-azure-monitor-opentelemetry>=1.6.0
+mcp>=1.28.1
+python-multipart>=0.0.32
+fpdf2>=2.8.7
+azure-monitor-opentelemetry>=1.8.8
 # Debug Console: query App Insights OTel spans for a run (KQL via resource id)
-azure-monitor-query>=1.4.0
-azure-identity>=1.16.0
-azure-ai-projects>=2.0.0
-openai>=1.0.0
+azure-monitor-query>=2.0.0
+azure-identity>=1.25.3
+azure-ai-projects>=2.2.0
+openai>=2.44.0
