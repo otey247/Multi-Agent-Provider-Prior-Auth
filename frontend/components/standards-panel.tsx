@@ -2,7 +2,13 @@
 
 import { useState } from "react";
 import type { StandardsAssessment, RequirementEvaluation } from "@/lib/types";
+import {
+  fetchDtrQuestionnaireResponse,
+  fetchPackQuestionnaire,
+  fetchPasBundle,
+} from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Shield,
@@ -14,8 +20,11 @@ import {
   XCircle,
   ChevronDown,
   ChevronRight,
+  Download,
   Info,
 } from "lucide-react";
+
+type FhirExportKind = "questionnaire" | "questionnaire-response" | "pas-bundle";
 
 const STATUS_VARIANT: Record<string, "success" | "warning" | "destructive" | "secondary"> = {
   MET: "success",
@@ -66,8 +75,42 @@ function RequirementRow({ e }: { e: RequirementEvaluation }) {
   );
 }
 
-export function StandardsPanel({ standards }: { standards: StandardsAssessment }) {
+export function StandardsPanel({
+  standards,
+  requestId,
+}: {
+  standards: StandardsAssessment;
+  requestId?: string;
+}) {
   const [open, setOpen] = useState(true);
+  const [exporting, setExporting] = useState<FhirExportKind | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  async function handleFhirExport(kind: FhirExportKind) {
+    setExporting(kind);
+    setExportError(null);
+    try {
+      const data =
+        kind === "questionnaire"
+          ? await fetchPackQuestionnaire(standards.policy_set_id)
+          : kind === "questionnaire-response"
+            ? await fetchDtrQuestionnaireResponse(requestId!)
+            : await fetchPasBundle(requestId!);
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/fhir+json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${kind}-${(requestId ?? standards.policy_set_id).slice(0, 8)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : "FHIR export failed");
+    } finally {
+      setExporting(null);
+    }
+  }
 
   if (!standards?.enabled) return null;
 
@@ -221,6 +264,47 @@ export function StandardsPanel({ standards }: { standards: StandardsAssessment }
             )}
           </div>
         )}
+
+        {/* FHIR artifact exports (Da Vinci DTR / PAS) */}
+        <div>
+          <p className="text-sm font-medium mb-2 flex items-center gap-1.5">
+            <Download className="h-4 w-4 text-info" />
+            Export FHIR artifacts
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="xs"
+              disabled={exporting !== null}
+              onClick={() => handleFhirExport("questionnaire")}
+            >
+              Questionnaire
+            </Button>
+            {requestId && (
+              <>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  disabled={exporting !== null}
+                  onClick={() => handleFhirExport("questionnaire-response")}
+                >
+                  QuestionnaireResponse
+                </Button>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  disabled={exporting !== null}
+                  onClick={() => handleFhirExport("pas-bundle")}
+                >
+                  PAS Bundle
+                </Button>
+              </>
+            )}
+          </div>
+          {exportError && (
+            <p className="text-xs text-destructive mt-1">{exportError}</p>
+          )}
+        </div>
 
         {standards.disclaimer && (
           <p className="text-xs text-muted-foreground italic flex items-start gap-1.5">

@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.observability import setup_observability
-from app.routers import review, decision, agents, observability, standards
+from app.routers import review, decision, agents, observability, standards, cds_hooks
 
 # Configure logging for the app namespace
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -37,6 +37,8 @@ app.include_router(decision.router, prefix="/api")
 app.include_router(agents.router, prefix="/api")
 app.include_router(observability.router, prefix="/api")
 app.include_router(standards.router, prefix="/api")
+# CDS Hooks (CRD) is mounted at the app root — clients expect /cds-services.
+app.include_router(cds_hooks.router)
 
 
 @app.get("/health")

@@ -147,7 +147,9 @@ export function ReviewDashboard({ review: rawReview, liveTrace }: ReviewDashboar
       </Card>
 
       {/* CMS-0057 / Da Vinci standards alignment (CRD/DTR/PAS) */}
-      {review.standards && <StandardsPanel standards={review.standards} />}
+      {review.standards && (
+        <StandardsPanel standards={review.standards} requestId={review.request_id} />
+      )}
 
       {/* Tool checks */}
       {(review.tool_results?.length ?? 0) > 0 && (

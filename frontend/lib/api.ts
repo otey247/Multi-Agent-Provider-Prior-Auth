@@ -264,3 +264,40 @@ export async function fetchObsLinks(correlationId: string): Promise<ObsLinks> {
 
   return response.json();
 }
+
+// --- FHIR artifact exports (CMS-0057 / Da Vinci standards layer) ---
+
+async function fetchFhirJson(path: string): Promise<unknown> {
+  const response = await fetch(`${API_BASE}${path}`);
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(
+      (error as { detail?: string }).detail ||
+        `FHIR export failed (${response.status})`
+    );
+  }
+
+  return response.json();
+}
+
+/** FHIR R4 Questionnaire (Da Vinci DTR-shaped) built from a policy pack. */
+export function fetchPackQuestionnaire(policySetId: string): Promise<unknown> {
+  return fetchFhirJson(
+    `/policy-packs/${encodeURIComponent(policySetId)}/questionnaire`
+  );
+}
+
+/** Pre-populated FHIR QuestionnaireResponse for a completed review. */
+export function fetchDtrQuestionnaireResponse(
+  requestId: string
+): Promise<unknown> {
+  return fetchFhirJson(
+    `/review/${encodeURIComponent(requestId)}/dtr/questionnaire-response`
+  );
+}
+
+/** PAS-shaped FHIR request Bundle for a completed review (export only). */
+export function fetchPasBundle(requestId: string): Promise<unknown> {
+  return fetchFhirJson(`/review/${encodeURIComponent(requestId)}/pas/bundle`);
+}

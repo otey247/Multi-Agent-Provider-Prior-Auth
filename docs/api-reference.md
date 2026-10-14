@@ -188,6 +188,124 @@ List all completed reviews (most recent first).
 
 ---
 
+## Standards Layer & FHIR Artifact Endpoints
+
+CMS-0057 / Da Vinci endpoints backed by the policy-pack store (see
+[CMS-0057 / Da Vinci Standards Layer](./cms-0057-standards-layer.md) and the
+[PRD](./prd-cms0057-davinci.md)). All artifacts are synthetic demo output
+derived from reviewed policy packs — no live payer API is called.
+
+### `GET /api/policy-packs`
+
+List the policy packs loaded from disk plus the resolved packs directory.
+
+### `GET /api/policy-packs/{policy_set_id}`
+
+Full policy pack detail. Returns `404` for an unknown pack id.
+
+### `GET /api/policy-packs/{policy_set_id}/questionnaire`
+
+FHIR R4 `Questionnaire` (Da Vinci DTR-shaped) built from the pack's
+documentation requirements — one item per requirement, `linkId`s from the
+pack's `dtr_questionnaire_item_link_id`, attachment items where the pack
+requires an attachment.
+
+### `GET /api/policy-packs/{policy_set_id}/questionnaire-package`
+
+`Parameters` payload shaped like the DTR `$questionnaire-package` operation
+output: a collection `Bundle` holding the `Questionnaire` plus a `Library`
+carrying the pack's medical-necessity rules (human-readable text; no CQL yet).
+
+### `GET /api/review/{request_id}/dtr/questionnaire-response`
+
+Pre-populated FHIR `QuestionnaireResponse` for a completed review. MET
+requirements are answered with chart evidence and a DTR `information-origin`
+extension (`source = auto`); unmet requirements stay unanswered and carry the
+gap action. `status` is `completed` only when every required, non-conditional
+requirement is MET, otherwise `in-progress`.
+
+Returns `404` when the review does not exist or matched no policy pack.
+
+### `GET /api/review/{request_id}/pas/bundle`
+
+PAS-shaped FHIR request `Bundle` for a completed review (export only — never
+submitted anywhere). The first entry is a `Claim` with `use =
+"preauthorization"`, followed by `Patient`, `Coverage`, `Practitioner`, the
+payer `Organization`, a `ServiceRequest`, the pre-populated
+`QuestionnaireResponse`, a `Location` (when a servicing facility is set), and
+one stub `DocumentReference` per attached note type. `Claim.supportingInfo`
+references the QuestionnaireResponse and enumerates every documentation
+requirement with its MET / INSUFFICIENT / MISSING status. A not-PAS-ready
+review still exports, but the `Claim` carries one `missing-for-submission`
+extension per open gap so the artifact itself is explicit about
+incompleteness.
+
+Returns `404` when the review does not exist or matched no policy pack.
+
+All FHIR endpoints return `503` when `ENABLE_FHIR_ARTIFACTS=false`.
+The canonical base URL stamped into artifacts comes from `FHIR_CANONICAL_BASE`
+(default `https://prior-auth.example/fhir`).
+
+### CRD CDS Hooks service
+
+Mounted at the **application root** (not under `/api`) per the CDS Hooks spec.
+Cards are derived from the policy-pack matcher; no live payer API is called.
+Gated by `ENABLE_CRD_HOOKS` (default `true`).
+
+#### `GET /cds-services`
+
+CDS Hooks discovery. Advertises two services — `prior-auth-crd` (hook
+`order-select`) and `prior-auth-crd-sign` (hook `order-sign`). Returns an empty
+`services` list when the service is disabled.
+
+```json
+{
+  "services": [
+    {
+      "hook": "order-select",
+      "id": "prior-auth-crd",
+      "title": "Prior authorization coverage requirements discovery",
+      "description": "…",
+      "prefetch": { "coverage": "Coverage?patient={{context.patientId}}" }
+    }
+  ]
+}
+```
+
+#### `POST /cds-services/{service_id}`
+
+Invoke a CRD service with a CDS Hooks request. The handler extracts the
+requested service + coverage from `context.draftOrders` / `context.selections`
+/ `prefetch`, matches a policy pack, and returns cards.
+
+**Request body (abbreviated):**
+
+```json
+{
+  "hook": "order-select",
+  "hookInstance": "…",
+  "context": {
+    "patientId": "Patient/thomas-reed",
+    "draftOrders": { "resourceType": "Bundle", "entry": [
+      { "resource": { "resourceType": "ServiceRequest",
+        "code": { "coding": [{ "system": "http://www.ama-assn.org/go/cpt", "code": "22612" }] },
+        "reasonCode": [{ "coding": [{ "code": "M43.16" }] }] } }
+    ]}
+  },
+  "prefetch": { "coverage": { "resourceType": "Coverage",
+    "payor": [{ "display": "UnitedHealthcare" }],
+    "class": [{ "type": { "coding": [{ "code": "plan" }] }, "value": "Commercial HMO" }] } }
+}
+```
+
+**Response:** a `warning` card when PA is required (with a link to that pack's
+`/questionnaire-package`), an `info` card when not required or when no pack
+matches. `400` on a malformed body, `404` for an unknown `service_id`, `503`
+when disabled. The handler never returns `500` — malformed context yields a
+safe non-blocking `info` card.
+
+---
+
 ## `POST /api/decision`
 
 Submit a human reviewer decision (accept or override) for a completed review.

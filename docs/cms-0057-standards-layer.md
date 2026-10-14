@@ -29,6 +29,7 @@ The immediate value (per the CMS-0057 write-up that motivated this) is **groundi
 - **Requirement-aware agents** — the hosted **Coverage** (Policy Matching) agent now treats a matched pack as the authoritative plan policy and maps evidence to each pack criterion; the **Compliance** agent can append payer-specific documentation requirements to its checklist.
 - **Standards Alignment UI panel** — a collapsible CRD → DTR → PAS card in the assessment view.
 - **Diagnostics + API** — an optional `standards` block on the review response, plus `GET /api/policy-packs` to list what's loaded.
+- **FHIR artifacts (DTR)** — any pack renders as a FHIR R4 `Questionnaire` (and a DTR `$questionnaire-package`-shaped `Parameters` payload), and any completed review with a matched pack produces a pre-populated `QuestionnaireResponse` with per-answer evidence provenance. See [FHIR artifacts](#fhir-artifacts-da-vinci-dtr) and the [CMS-0057 / Da Vinci PRD](./prd-cms0057-davinci.md) (Epic 1).
 - **Feature-flagged & additive** — everything degrades gracefully; when no pack matches or the layer is disabled, the pipeline behaves exactly as before.
 
 ---
@@ -117,6 +118,50 @@ The orchestrator injects a compact requirement set into the hosted agents (null 
 
 ---
 
+## FHIR artifacts (Da Vinci DTR)
+
+The standards layer can render its policy-pack data and DTR-lite evaluations as real FHIR R4 resources ([PRD Epic 1](./prd-cms0057-davinci.md)). All builders live in [`backend/app/services/standards/fhir.py`](../backend/app/services/standards/fhir.py) as pure, dependency-free dict constructors, so the FHIR shape is isolated in one module.
+
+| Artifact | Source | Endpoint |
+|---|---|---|
+| `Questionnaire` | Pack `documentation_requirements` (one item per requirement; `linkId` from `dtr_questionnaire_item_link_id`; attachment items where `attachment_required`) | `GET /api/policy-packs/{id}/questionnaire` |
+| `Parameters` (DTR `$questionnaire-package` shape) | The `Questionnaire` plus a `Library` carrying `medical_necessity_criteria` as human-readable logic (no CQL yet) | `GET /api/policy-packs/{id}/questionnaire-package` |
+| `QuestionnaireResponse` | A completed review's DTR-lite `requirement_evaluations` — MET items answered with evidence + the DTR `information-origin` extension (`source = auto`); unmet items unanswered with the gap action attached | `GET /api/review/{request_id}/dtr/questionnaire-response` |
+| PAS request `Bundle` | The full packet as a Da Vinci PAS-shaped Bundle — `Claim` (`use = preauthorization`) with per-requirement `supportingInfo`, plus `Patient`, `Coverage`, `Practitioner`, payer `Organization`, `ServiceRequest`, the `QuestionnaireResponse`, and stub `DocumentReference`s for attachments. Export only — never submitted. Not-ready reviews carry a `missing-for-submission` extension per open gap | `GET /api/review/{request_id}/pas/bundle` |
+
+Conventions:
+
+- Da Vinci DTR profile URLs are recorded in `meta.profile`; repo-scoped extension URLs carry demo-only annotations (evaluation status, confidence, gap action, disclaimer).
+- `QuestionnaireResponse.status` is `completed` only when every required, non-conditional requirement is MET — otherwise `in-progress`, so the artifact itself shows the remaining human work.
+- Every artifact embeds the synthetic-demo disclaimer; the canonical base URL is a placeholder (`FHIR_CANONICAL_BASE`) so generated artifacts cannot be mistaken for a live payer feed.
+
+Verified offline by `cd backend && python scripts/check_fhir_artifacts.py` (flagship pack → 8-item Questionnaire; flagship sample case → 6 answered / 2 unanswered, `in-progress`; gap-free variant → `completed`; PAS Bundle → Claim-first collection with resolving references, `missing-for-submission` annotation only when not ready).
+
+The Standards Alignment panel exposes **Export FHIR artifacts** buttons (Questionnaire, QuestionnaireResponse, PAS Bundle) that download the JSON for the current review via these endpoints.
+
+---
+
+## CRD as a CDS Hooks service (Da Vinci CRD)
+
+The policy-pack matcher is also exposed as a real **CDS Hooks** service — the same interface an EHR calls at order time to discover coverage requirements ([PRD Epic 3](./prd-cms0057-davinci.md)). It is mounted at the **application root** (not under `/api`) because CDS Hooks clients expect discovery at `{baseUrl}/cds-services`. Handler logic lives in [`backend/app/services/standards/crd_hooks.py`](../backend/app/services/standards/crd_hooks.py); models in [`backend/app/models/cds_hooks.py`](../backend/app/models/cds_hooks.py).
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /cds-services` | Discovery document advertising two services: `prior-auth-crd` (hook `order-select`) and `prior-auth-crd-sign` (hook `order-sign`), each with a `coverage` prefetch template |
+| `POST /cds-services/{service_id}` | Invoke a service with a CDS Hooks request; returns decision `cards` |
+
+The handler walks the hook `context` (`draftOrders` bundle, `selections`) and `prefetch` for the requested service (`ServiceRequest`/`DeviceRequest`/`MedicationRequest` codes → procedure/diagnosis) and coverage (`Coverage.payor.display` → payer, `Coverage.class[plan]` → plan), then calls `match_policy_pack()`. Cards:
+
+- **Match + PA required** → a `warning` card: "Prior authorization required — {policy}", routing channel and requirement count in the detail, and an `absolute` link to that pack's `/questionnaire-package` (the DTR hand-off). The link's host is taken from the incoming request, so it points back at whatever served the CDS call.
+- **Match + PA not required** → an `info` card.
+- **No match** → an `info` card noting the runtime Medicare LCD/NCD fallback — never a false assertion of certainty.
+
+`build_crd_response()` never raises: malformed input yields a safe non-blocking `info` card, so the service cannot 500. When `ENABLE_CRD_HOOKS=false`, discovery returns an empty `services` list and invocation returns `503`.
+
+Verified offline by `cd backend && python scripts/check_crd_hooks.py` (discovery shape; CPT 22612 / UHC Commercial → warning card with a questionnaire-package link; CPT 99213 / Aetna → info card; malformed input → safe card).
+
+---
+
 ## UI — Standards Alignment panel
 
 A new [`StandardsPanel`](../frontend/components/standards-panel.tsx) renders under the Submission Readiness header in the assessment tab:
@@ -138,6 +183,10 @@ It reuses the existing card/badge design, is collapsible so the baseline demo st
 | `POST /api/review`, `POST /api/review/stream` | Unchanged contract; response now includes an optional `standards` block |
 | `GET /api/policy-packs` | List loaded packs + resolved directory (fast, agent-free — confirms a pack shipped in the image) |
 | `GET /api/policy-packs/{policy_set_id}` | Full pack detail |
+| `GET /api/policy-packs/{policy_set_id}/questionnaire` | FHIR R4 `Questionnaire` (DTR-shaped) built from the pack |
+| `GET /api/policy-packs/{policy_set_id}/questionnaire-package` | DTR `$questionnaire-package`-shaped `Parameters` (Questionnaire + rules `Library`) |
+| `GET /api/review/{request_id}/dtr/questionnaire-response` | Pre-populated `QuestionnaireResponse` for a completed review (404 when no pack matched) |
+| `GET /api/review/{request_id}/pas/bundle` | PAS-shaped request `Bundle` for a completed review (export only; 404 when no pack matched) |
 
 ### Feature flags ([`backend/app/config.py`](../backend/app/config.py))
 
@@ -147,6 +196,9 @@ It reuses the existing card/badge design, is collapsible so the baseline demo st
 | `ENABLE_POLICY_PACKS` | `true` | Enable pack matching |
 | `ENABLE_PAS_PREPARE` | `true` | Build the PAS package preview (never submits) |
 | `POLICY_PACKS_DIR` | *(unset)* | Override the packs directory (defaults to bundled `backend/policy_packs`) |
+| `ENABLE_FHIR_ARTIFACTS` | `true` | Serve the FHIR artifact endpoints (Questionnaire / package / QuestionnaireResponse / PAS bundle); `503` when off |
+| `FHIR_CANONICAL_BASE` | `https://prior-auth.example/fhir` | Canonical base URL stamped into generated FHIR artifacts |
+| `ENABLE_CRD_HOOKS` | `true` | Serve the CRD CDS Hooks service at `/cds-services`; empty discovery + `503` invocation when off |
 
 ---
 
@@ -174,6 +226,8 @@ It reuses the existing card/badge design, is collapsible so the baseline demo st
 |---|---|---|
 | Pack load + match | `cd backend && python scripts/check_policy_store.py` | PASS |
 | Standards service (offline) | `cd backend && python scripts/check_standards.py` | PASS |
+| FHIR artifacts (offline) | `cd backend && python scripts/check_fhir_artifacts.py` | PASS |
+| CRD CDS Hooks (offline) | `cd backend && python scripts/check_crd_hooks.py` | PASS |
 | Frontend types | `cd frontend && npx tsc --noEmit` | clean |
 | Pack shipped in image | `GET /api/policy-packs` | `count:1`, `/app/policy_packs` |
 | Full pipeline (live) | `python scripts/e2e_standards.py <backendUrl>` | PASS |
@@ -204,3 +258,5 @@ Pack content shipped here is synthetic demo data. Medicare LCD/NCD runtime searc
 ## Future direction
 
 The FHIR-aligned model is the on-ramp to: real CRD (replace runtime search with a payer coverage-requirements feed), real DTR (consume payer `Questionnaire`/CQL at runtime), real PAS submission + status tracking, and Agent-Creator-generated payer-specific clinician assistants.
+
+The staged plan for getting there — PAS `Bundle` export, a CRD CDS Hooks service, a synthetic payer sandbox, PA lifecycle timers (72h/7d), denial/appeal handling, metrics, and FHIR-native intake — is specified epic-by-epic in the [CMS-0057 / Da Vinci PRD](./prd-cms0057-davinci.md). Epic 1 (DTR FHIR artifacts) is implemented; see [FHIR artifacts](#fhir-artifacts-da-vinci-dtr).
